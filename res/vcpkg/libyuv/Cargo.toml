@@ -1,0 +1,11 @@
+[package]
+name = "libyuv"
+version = "0.1.0"
+edition = "2021"
+description = "libyuv bindings for high-performance pixel format conversion"
+license = "BSD-3-Clause"
+
+[dependencies]
+
+[build-dependencies]
+bindgen = "0.70.1"

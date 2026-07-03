@@ -1,0 +1,16 @@
+# Cross-compilation configuration for One-KVM
+# Uses pre-built custom Debian 11 based images for consistent build/runtime environment
+# See: https://github.com/cross-rs/cross
+
+[build]
+# Default Docker image settings
+default-target = "x86_64-unknown-linux-gnu"
+
+[target.x86_64-unknown-linux-gnu]
+dockerfile = "build/cross/Dockerfile.x86_64"
+
+[target.aarch64-unknown-linux-gnu]
+dockerfile = "build/cross/Dockerfile.arm64"
+
+[target.armv7-unknown-linux-gnueabihf]
+dockerfile = "build/cross/Dockerfile.armv7"

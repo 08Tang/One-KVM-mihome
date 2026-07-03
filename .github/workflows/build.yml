@@ -1,0 +1,301 @@
+name: Build
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: Publish GitHub Release
+        required: false
+        default: false
+        type: boolean
+      release_tag:
+        description: Release tag name when publishing
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  frontend:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build frontend
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Upload frontend dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+          if-no-files-found: error
+          retention-days: 7
+
+  deb:
+    runs-on: ubuntu-22.04
+    needs: frontend
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cross
+        run: cargo install cross --locked
+
+      - name: Build linux binary
+        run: bash build/build-images.sh
+
+      - name: Package deb
+        run: bash build/package-deb.sh
+
+      - name: Upload deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: one-kvm-deb
+          path: target/debian/*.deb
+          if-no-files-found: error
+          retention-days: 7
+
+  windows:
+    runs-on: windows-2022
+    needs: frontend
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Prepare vcpkg and dependencies
+        shell: pwsh
+        run: |
+          $env:VCPKG_ROOT = "C:\vcpkg"
+          $env:VCPKG_DEFAULT_TRIPLET = "x64-windows-static"
+          $env:VCPKG_INSTALLED_DIR = Join-Path $pwd "vcpkg_installed"
+
+          if (-not (Test-Path $env:VCPKG_ROOT)) {
+            git clone https://github.com/microsoft/vcpkg $env:VCPKG_ROOT
+          }
+
+          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+          & "$env:VCPKG_ROOT\vcpkg.exe" install --triplet $env:VCPKG_DEFAULT_TRIPLET --x-install-root="$env:VCPKG_INSTALLED_DIR"
+
+          $tripletRoot = Join-Path $env:VCPKG_INSTALLED_DIR $env:VCPKG_DEFAULT_TRIPLET
+          $env:TURBOJPEG_SOURCE = "explicit"
+          $env:TURBOJPEG_LIB_DIR = Join-Path $tripletRoot "lib"
+          $env:TURBOJPEG_INCLUDE_DIR = Join-Path $tripletRoot "include"
+
+          "VCPKG_ROOT=$env:VCPKG_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "VCPKG_DEFAULT_TRIPLET=$env:VCPKG_DEFAULT_TRIPLET" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "VCPKG_INSTALLED_DIR=$env:VCPKG_INSTALLED_DIR" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "TURBOJPEG_SOURCE=$env:TURBOJPEG_SOURCE" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "TURBOJPEG_LIB_DIR=$env:TURBOJPEG_LIB_DIR" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "TURBOJPEG_INCLUDE_DIR=$env:TURBOJPEG_INCLUDE_DIR" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Build Windows exe
+        shell: pwsh
+        run: .\build\windows\build.ps1 -Configuration release -Package
+
+      - name: Upload exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: one-kvm-windows-exe
+          path: target/x86_64-pc-windows-msvc/release/one-kvm_*.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  android:
+    runs-on: ubuntu-22.04
+    needs: frontend
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache Android Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache/android
+          key: android-buildx-${{ runner.os }}-${{ hashFiles('build/cross/Dockerfile.android') }}
+          restore-keys: |
+            android-buildx-${{ runner.os }}-
+
+      - name: Build Android Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: build/cross
+          file: build/cross/Dockerfile.android
+          tags: one-kvm-android-build:ci
+          load: true
+          cache-from: type=local,src=/tmp/.buildx-cache/android
+          cache-to: type=local,dest=/tmp/.buildx-cache/android-new,mode=max
+
+      - name: Rotate Android Docker layer cache
+        run: |
+          rm -rf /tmp/.buildx-cache/android
+          mv /tmp/.buildx-cache/android-new /tmp/.buildx-cache/android
+
+      - name: Cache Android build dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            .github/android-cache/gradle
+            .github/android-cache/cargo-registry
+            .github/android-cache/cargo-git
+            .tmp/android-ffmpeg-check
+            .tmp/android-turbojpeg-src
+            .tmp/android-libyuv-src
+            .tmp/android-alsa-src
+            .tmp/android-opus-src
+            dist/android-ffmpeg-mediacodec
+            dist/android-turbojpeg
+            dist/android-libyuv
+            dist/android-alsa
+            dist/android-opus
+          key: android-deps-${{ runner.os }}-${{ hashFiles('android/**/*.gradle.kts', 'android/gradle/wrapper/gradle-wrapper.properties', 'android/native/Cargo.lock', 'Cargo.lock', 'scripts/build-android-*.sh') }}
+          restore-keys: |
+            android-deps-${{ runner.os }}-
+
+      - name: Prepare Android FFmpeg source
+        run: |
+          chmod +x android/gradlew
+          if [ ! -x .tmp/android-ffmpeg-check/src/ffmpeg-rockchip/configure ]; then
+            rm -rf .tmp/android-ffmpeg-check/src
+            mkdir -p .tmp/android-ffmpeg-check/src
+            wget -q https://files.mofeng.run/src/image/other/ffmpeg.tar.gz -O .tmp/android-ffmpeg-check/ffmpeg.tar.gz
+            tar -xzf .tmp/android-ffmpeg-check/ffmpeg.tar.gz -C .tmp/android-ffmpeg-check/src --strip-components=1
+          fi
+
+      - name: Build Android APK
+        env:
+          ONE_KVM_ANDROID_DOCKER_IMAGE: one-kvm-android-build:ci
+          ONE_KVM_ANDROID_SKIP_DOCKER_BUILD: "1"
+          ONE_KVM_ANDROID_GRADLE_CACHE_DIR: ${{ github.workspace }}/.github/android-cache/gradle
+          ONE_KVM_ANDROID_CARGO_REGISTRY_CACHE_DIR: ${{ github.workspace }}/.github/android-cache/cargo-registry
+          ONE_KVM_ANDROID_CARGO_GIT_CACHE_DIR: ${{ github.workspace }}/.github/android-cache/cargo-git
+        run: bash build/build-android.sh all
+
+      - name: Fix Android build permissions
+        if: ${{ always() }}
+        run: |
+          paths=(
+            .github/android-cache
+            .tmp/android-ffmpeg-check
+            .tmp/android-turbojpeg-src
+            .tmp/android-libyuv-src
+            .tmp/android-alsa-src
+            .tmp/android-opus-src
+            dist/android-ffmpeg-mediacodec
+            dist/android-turbojpeg
+            dist/android-libyuv
+            dist/android-alsa
+            dist/android-opus
+            target/android
+            android/.gradle
+            android/app/build
+            android/native/target
+          )
+          existing=()
+          for path in "${paths[@]}"; do
+            if [ -e "$path" ]; then
+              existing+=("$path")
+            fi
+          done
+          if [ "${#existing[@]}" -gt 0 ]; then
+            sudo chown -R "$USER:$USER" "${existing[@]}"
+          fi
+
+      - name: Upload Android APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: one-kvm-android-apk
+          path: target/android/one-kvm_*.apk
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    runs-on: ubuntu-22.04
+    needs: [deb, windows, android]
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release }}
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - name: Validate release tag
+        run: |
+          if [ -z "${{ inputs.release_tag }}" ]; then
+            echo "release_tag is required when publish_release is true"
+            exit 1
+          fi
+
+      - name: Download deb artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: one-kvm-deb
+          path: release-artifacts/deb
+
+      - name: Download exe artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: one-kvm-windows-exe
+          path: release-artifacts/windows
+
+      - name: Download Android artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: one-kvm-android-apk
+          path: release-artifacts/android
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          prerelease: true
+          generate_release_notes: true
+          files: |
+            release-artifacts/deb/*.deb
+            release-artifacts/windows/*.exe
+            release-artifacts/android/*.apk

@@ -1,0 +1,907 @@
+import { request, ApiError } from './request'
+import type { CanonicalKey, Ch9329DescriptorState } from '@/types/generated'
+import { useHidWebSocket, type HidKeyboardEvent, type HidMouseEvent } from '@/composables/useHidWebSocket'
+
+const API_BASE = '/api'
+
+export const authApi = {
+  login: (username: string, password: string) =>
+    request<{ success: boolean; message?: string }>(
+      '/auth/login',
+      {
+        method: 'POST',
+        body: JSON.stringify({ username, password }),
+      },
+      { toastOnError: false },
+    ),
+
+  logout: () =>
+    request<{ success: boolean }>('/auth/logout', { method: 'POST' }),
+
+  check: () =>
+    request<{ authenticated: boolean; user?: string }>('/auth/check'),
+
+  changePassword: (currentPassword: string, newPassword: string) =>
+    request<{ success: boolean }>('/auth/password', {
+      method: 'POST',
+      body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+    }),
+
+  changeUsername: (username: string, currentPassword: string) =>
+    request<{ success: boolean }>('/auth/username', {
+      method: 'POST',
+      body: JSON.stringify({ username, current_password: currentPassword }),
+    }),
+}
+
+export interface NetworkAddress {
+  interface: string
+  ip: string
+}
+
+export interface DeviceInfo {
+  hostname: string
+  cpu_model: string
+  cpu_usage: number
+  memory_total: number
+  memory_used: number
+  network_addresses: NetworkAddress[]
+  serial_ports: string[]
+}
+
+export interface FeatureCapability {
+  available: boolean
+  backends: string[]
+  selected_backend?: string
+  reason?: string
+}
+
+export interface PlatformCapabilities {
+  mode: 'android_amlogic' | 'linux' | 'windows'
+  mode_label: string
+  video_capture: FeatureCapability
+  encoder: FeatureCapability
+  hid: FeatureCapability
+  atx: FeatureCapability
+  msd: FeatureCapability
+  otg: FeatureCapability
+  audio: FeatureCapability
+  rustdesk: FeatureCapability
+  vnc: FeatureCapability
+  diagnostics: FeatureCapability
+  extensions: FeatureCapability
+  service_installation: FeatureCapability
+}
+
+export const systemApi = {
+  info: () =>
+    request<{
+      version: string
+      build_date: string
+      initialized: boolean
+      platform: PlatformCapabilities
+      capabilities: {
+        video: { available: boolean; backend?: string; reason?: string }
+        hid: { available: boolean; backend?: string; reason?: string }
+        msd: { available: boolean; backend?: string; reason?: string }
+        atx: { available: boolean; backend?: string; reason?: string }
+        audio: { available: boolean; backend?: string; reason?: string }
+        rustdesk: { available: boolean; backend?: string; reason?: string }
+        vnc: { available: boolean; backend?: string; reason?: string }
+      }
+      disk_space?: {
+        total: number
+        available: number
+        used: number
+      }
+      device_info?: DeviceInfo
+    }>('/info'),
+
+  health: () => request<{ status: string; version: string }>('/health'),
+
+  setupStatus: () =>
+    request<{ initialized: boolean; needs_setup: boolean; platform: PlatformCapabilities }>('/setup'),
+
+  setup: (data: {
+    username: string
+    password: string
+    video_device?: string
+    video_format?: string
+    video_width?: number
+    video_height?: number
+    video_fps?: number
+    hid_backend?: string
+    hid_ch9329_port?: string
+    hid_ch9329_baudrate?: number
+    hid_otg_udc?: string
+    hid_otg_profile?: string
+    hid_otg_endpoint_budget?: string
+    hid_otg_keyboard_leds?: boolean
+    msd_enabled?: boolean
+    encoder_backend?: string
+    audio_device?: string
+    ttyd_enabled?: boolean
+    rustdesk_enabled?: boolean
+  }) =>
+    request<{ success: boolean; message?: string }>('/setup/init', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  restart: () =>
+    request<{ success: boolean; message?: string }>('/system/restart', {
+      method: 'POST',
+    }),
+}
+
+export type UpdateChannel = 'stable' | 'beta'
+
+export interface UpdateOverviewResponse {
+  success: boolean
+  current_version: string
+  channel: UpdateChannel
+  latest_version: string
+  upgrade_available: boolean
+  target_version?: string
+  notes_between: Array<{
+    version: string
+    published_at: string
+    notes: string[]
+  }>
+}
+
+export interface UpdateStatusResponse {
+  success: boolean
+  phase: 'idle' | 'checking' | 'downloading' | 'verifying' | 'installing' | 'restarting' | 'success' | 'failed'
+  progress: number
+  current_version: string
+  target_version?: string
+  message?: string
+  last_error?: string
+}
+
+export const updateApi = {
+  overview: (channel: UpdateChannel = 'stable') =>
+    request<UpdateOverviewResponse>(
+      `/update/overview?channel=${encodeURIComponent(channel)}`,
+      {},
+      { toastOnError: false },
+    ),
+
+  upgrade: (payload: { channel?: UpdateChannel; target_version?: string }) =>
+    request<{ success: boolean; message?: string }>('/update/upgrade', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  status: () =>
+    request<UpdateStatusResponse>('/update/status'),
+}
+
+export interface VideoCodecInfo {
+  id: string
+  name: string
+  protocol: 'http' | 'webrtc'
+  hardware: boolean
+  backend: string | null
+  available: boolean
+}
+
+export interface EncoderBackendInfo {
+  id: string
+  name: string
+  is_hardware: boolean
+  supported_formats: string[]
+}
+
+export interface AvailableCodecsResponse {
+  success: boolean
+  backends: EncoderBackendInfo[]
+  codecs: VideoCodecInfo[]
+}
+
+export interface StreamConstraintsResponse {
+  success: boolean
+  allowed_codecs: string[]
+  locked_codec: string | null
+  disallow_mjpeg: boolean
+  sources: {
+    rustdesk: boolean
+    rtsp: boolean
+    vnc: boolean
+  }
+  reason: string
+  current_mode: string
+}
+
+export interface VideoEncoderSelfCheckCodec {
+  id: string
+  name: string
+}
+
+export interface VideoEncoderSelfCheckCell {
+  codec_id: string
+  ok: boolean
+  elapsed_ms?: number | null
+}
+
+export interface VideoEncoderSelfCheckRow {
+  resolution_id: string
+  resolution_label: string
+  width: number
+  height: number
+  cells: VideoEncoderSelfCheckCell[]
+}
+
+export interface VideoEncoderSelfCheckResponse {
+  current_hardware_encoder: string
+  codecs: VideoEncoderSelfCheckCodec[]
+  rows: VideoEncoderSelfCheckRow[]
+}
+
+export const streamApi = {
+  status: () =>
+    request<{
+      state:
+        | 'uninitialized'
+        | 'ready'
+        | 'streaming'
+        | 'no_signal'
+        | 'no_cable'
+        | 'no_sync'
+        | 'out_of_range'
+        | 'device_lost'
+        | 'recovering'
+        | 'device_busy'
+        | 'error'
+      device: string | null
+      format: string | null
+      resolution: [number, number] | null
+      clients: number
+      target_fps: number
+      fps: number
+    }>('/stream/status'),
+
+  start: () =>
+    request<{ success: boolean }>('/stream/start', { method: 'POST' }),
+
+  stop: () =>
+    request<{ success: boolean }>('/stream/stop', { method: 'POST' }),
+
+  getMjpegUrl: (clientId?: string) => {
+    const base = `${API_BASE}/stream/mjpeg`
+    return clientId ? `${base}?client_id=${clientId}` : base
+  },
+
+  getSnapshotUrl: () => `${API_BASE}/snapshot`,
+
+  getMode: () =>
+    request<{ success: boolean; mode: string; transition_id?: string; switching?: boolean; message?: string }>('/stream/mode'),
+
+  setMode: (mode: string) =>
+    request<{ success: boolean; mode: string; transition_id?: string; switching?: boolean; message?: string }>('/stream/mode', {
+      method: 'POST',
+      body: JSON.stringify({ mode }),
+    }),
+
+  getCodecs: () =>
+    request<AvailableCodecsResponse>('/stream/codecs'),
+
+  getConstraints: () =>
+    request<StreamConstraintsResponse>('/stream/constraints'),
+
+  encoderSelfCheck: () =>
+    request<VideoEncoderSelfCheckResponse>('/video/encoder/self-check'),
+
+  setBitratePreset: (bitrate_preset: import('@/types/generated').BitratePreset) =>
+    request<{ success: boolean; message?: string }>('/stream/bitrate', {
+      method: 'POST',
+      body: JSON.stringify({ bitrate_preset }),
+    }),
+}
+
+export interface IceCandidate {
+  candidate: string
+  sdpMid?: string
+  sdpMLineIndex?: number
+  usernameFragment?: string
+}
+
+export interface IceServerConfig {
+  urls: string[]
+  username?: string
+  credential?: string
+}
+
+export const webrtcApi = {
+  createSession: () =>
+    request<{ session_id: string }>('/webrtc/session', { method: 'POST' }),
+
+  offer: (sdp: string) =>
+    request<{ sdp: string; session_id: string; ice_candidates: IceCandidate[] }>('/webrtc/offer', {
+      method: 'POST',
+      body: JSON.stringify({ sdp }),
+    }),
+
+  addIceCandidate: (sessionId: string, candidate: IceCandidate) =>
+    request<{ success: boolean }>('/webrtc/ice', {
+      method: 'POST',
+      body: JSON.stringify({ session_id: sessionId, candidate }),
+    }),
+
+  status: () =>
+    request<{
+      session_count: number
+      sessions: Array<{ session_id: string; state: string }>
+    }>('/webrtc/status'),
+
+  close: (sessionId: string) =>
+    request<{ success: boolean }>('/webrtc/close', {
+      method: 'POST',
+      body: JSON.stringify({ session_id: sessionId }),
+    }),
+
+  getIceServers: () =>
+    request<{ ice_servers: IceServerConfig[]; mdns_mode: string }>('/webrtc/ice-servers'),
+}
+
+const hidWs = useHidWebSocket()
+let hidWsInitialized = false
+
+async function ensureHidConnection() {
+  if (!hidWsInitialized) {
+    hidWsInitialized = true
+    await hidWs.connect()
+  }
+}
+
+function mapButton(button?: 'left' | 'right' | 'middle'): number | undefined {
+  if (!button) return undefined
+  const buttonMap = { left: 0, middle: 1, right: 2 }
+  return buttonMap[button]
+}
+
+export const hidApi = {
+  status: () =>
+    request<{
+      available: boolean
+      backend: string
+      initialized: boolean
+      online: boolean
+      supports_absolute_mouse: boolean
+      keyboard_leds_enabled: boolean
+      led_state: {
+        num_lock: boolean
+        caps_lock: boolean
+        scroll_lock: boolean
+        compose: boolean
+        kana: boolean
+      }
+      screen_resolution: [number, number] | null
+      device: string | null
+      error: string | null
+      error_code: string | null
+    }>('/hid/status'),
+
+  otgSelfCheck: () =>
+    request<{
+      overall_ok: boolean
+      error_count: number
+      warning_count: number
+      hid_backend: string
+      selected_udc: string | null
+      bound_udc: string | null
+      udc_state: string | null
+      udc_speed: string | null
+      available_udcs: string[]
+      other_gadgets: string[]
+      checks: Array<{
+        id: string
+        ok: boolean
+        level: 'info' | 'warn' | 'error'
+        message: string
+        hint?: string
+        path?: string
+      }>
+    }>('/hid/otg/self-check'),
+
+  keyboard: async (type: 'down' | 'up', key: CanonicalKey, modifier?: number) => {
+    await ensureHidConnection()
+    const event: HidKeyboardEvent = {
+      type: type === 'down' ? 'keydown' : 'keyup',
+      key,
+      modifier: (modifier ?? 0) & 0xff,
+    }
+    await hidWs.sendKeyboard(event)
+    return { success: true }
+  },
+
+  mouse: async (data: {
+    type: 'move' | 'move_abs' | 'down' | 'up' | 'scroll'
+    x?: number | null
+    y?: number | null
+    button?: 'left' | 'right' | 'middle' | null
+    scroll?: number | null
+  }) => {
+    await ensureHidConnection()
+    const event: HidMouseEvent = {
+      type: data.type === 'move_abs' ? 'moveabs' : data.type,
+      x: data.x ?? undefined,
+      y: data.y ?? undefined,
+      button: mapButton(data.button ?? undefined),
+      scroll: data.scroll ?? undefined,
+    }
+    await hidWs.sendMouse(event)
+    return { success: true }
+  },
+
+  reset: () =>
+    request<{ success: boolean }>('/hid/reset', { method: 'POST' }),
+
+  ch9329Descriptor: (params?: { port?: string; baudRate?: number }) => {
+    const query = new URLSearchParams()
+    if (params?.port) query.set('port', params.port)
+    if (params?.baudRate) query.set('baud_rate', String(params.baudRate))
+    const suffix = query.toString()
+    return request<Ch9329DescriptorState>(`/hid/ch9329/descriptor${suffix ? `?${suffix}` : ''}`)
+  },
+
+  consumer: async (usage: number) => {
+    await ensureHidConnection()
+    await hidWs.sendConsumer({ usage })
+    return { success: true }
+  },
+
+  connectWebSocket: () => hidWs.connect(),
+  disconnectWebSocket: () => hidWs.disconnect(),
+  isWebSocketConnected: () => hidWs.connected.value,
+}
+
+export type ComputerUseStatus =
+  | 'idle'
+  | 'waiting_screenshot'
+  | 'thinking'
+  | 'executing'
+  | 'completed'
+  | 'failed'
+  | 'stopped'
+
+export type ComputerUseButton = 'left' | 'middle' | 'right'
+
+export type ComputerUseAction =
+  | { type: 'click'; x: number; y: number; button?: ComputerUseButton }
+  | { type: 'double_click'; x: number; y: number; button?: ComputerUseButton }
+  | { type: 'move'; x: number; y: number }
+  | { type: 'drag'; path: Array<{ x: number; y: number }>; button?: ComputerUseButton }
+  | { type: 'scroll'; x: number; y: number; dx?: number; dy?: number }
+  | { type: 'type'; text: string }
+  | { type: 'keypress'; keys: string[] }
+  | { type: 'wait'; ms: number }
+  | { type: 'screenshot' }
+
+export interface ComputerUseScreenshot {
+  data_url: string
+  width: number
+  height: number
+}
+
+export type ComputerUseConversationMessage =
+  | { role: 'user'; text: string }
+  | { role: 'assistant'; text: string }
+
+export interface ComputerUseConfig {
+  enabled: boolean
+  provider: string
+  base_url: string
+  model: string
+  max_steps: number
+  timeout_seconds: number
+  api_key_configured: boolean
+  api_key_source: string
+}
+
+export interface ComputerUseSession {
+  id: string | null
+  status: ComputerUseStatus
+  prompt: string | null
+  step: number
+  max_steps: number
+  last_error: string | null
+  final_message: string | null
+}
+
+export const computerUseApi = {
+  config: () => request<ComputerUseConfig>('/config/computer-use'),
+
+  updateConfig: (data: {
+    enabled?: boolean
+    base_url?: string
+    model?: string
+    max_steps?: number
+    timeout_seconds?: number
+    openai_api_key?: string
+    clear_openai_api_key?: boolean
+  }) =>
+    request<ComputerUseConfig>('/config/computer-use', {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+
+  session: () => request<ComputerUseSession>('/computer-use/session'),
+
+  start: (data: { prompt: string; continue_conversation?: boolean; client_id: string; max_steps?: number; timeout_seconds?: number }) =>
+    request<ComputerUseSession>('/computer-use/session', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  stop: () =>
+    request<ComputerUseSession>('/computer-use/session/stop', {
+      method: 'POST',
+    }),
+}
+
+export const atxApi = {
+  status: () =>
+    request<{
+      available: boolean
+      backend: string
+      initialized: boolean
+      power_status: 'on' | 'off' | 'unknown'
+      led_supported: boolean
+    }>('/atx/status'),
+
+  power: (action: 'short' | 'long' | 'reset') =>
+    request<{ success: boolean; message?: string }>('/atx/power', {
+      method: 'POST',
+      body: JSON.stringify({ action }),
+    }),
+}
+
+export interface MsdImage {
+  id: string
+  name: string
+  size: number
+  created_at: string
+}
+
+export interface DriveFile {
+  name: string
+  path: string
+  is_dir: boolean
+  size: number
+}
+
+export const msdApi = {
+  status: () =>
+    request<{
+      available: boolean
+      state: {
+        connected: boolean
+        mode: 'none' | 'image' | 'drive'
+        current_image: {
+          id: string
+          name: string
+          size: number
+          created_at: string
+        } | null
+        drive_info: {
+          size: number
+          used: number
+          free: number
+          initialized: boolean
+        } | null
+      }
+    }>('/msd/status'),
+
+  listImages: () => request<MsdImage[]>('/msd/images'),
+
+  uploadImage: async (file: File, onProgress?: (progress: number) => void) => {
+    const formData = new FormData()
+    formData.append('file', file)
+
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', `${API_BASE}/msd/images`)
+    xhr.withCredentials = true
+
+    return new Promise<MsdImage>((resolve, reject) => {
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable && onProgress) {
+          onProgress((e.loaded / e.total) * 100)
+        }
+      }
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(JSON.parse(xhr.responseText))
+        } else {
+          reject(new ApiError(xhr.status, 'Upload failed'))
+        }
+      }
+
+      xhr.onerror = () => reject(new ApiError(0, 'Network error'))
+      xhr.send(formData)
+    })
+  },
+
+  deleteImage: (id: string) =>
+    request<{ success: boolean }>(`/msd/images/${id}`, { method: 'DELETE' }),
+
+  connect: (mode: 'image' | 'drive', imageId?: string, cdrom?: boolean, readOnly?: boolean) =>
+    request<{ success: boolean }>('/msd/connect', {
+      method: 'POST',
+      body: JSON.stringify({ mode, image_id: imageId, cdrom, read_only: readOnly }),
+    }),
+
+  disconnect: () =>
+    request<{ success: boolean }>('/msd/disconnect', { method: 'POST' }),
+
+  driveInfo: () =>
+    request<{
+      size: number
+      used: number
+      free: number
+      initialized: boolean
+    }>('/msd/drive'),
+
+  initDrive: (sizeMb?: number) =>
+    request<{ path: string; size_mb: number }>('/msd/drive/init', {
+      method: 'POST',
+      body: JSON.stringify({ size_mb: sizeMb }),
+    }),
+
+  deleteDrive: () =>
+    request<{ success: boolean }>('/msd/drive', { method: 'DELETE' }),
+
+  listDriveFiles: (path = '/') =>
+    request<DriveFile[]>(`/msd/drive/files?path=${encodeURIComponent(path)}`),
+
+  uploadDriveFile: async (file: File, targetPath = '/', onProgress?: (progress: number) => void) => {
+    const formData = new FormData()
+    formData.append('file', file)
+
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', `${API_BASE}/msd/drive/files?path=${encodeURIComponent(targetPath)}`)
+    xhr.withCredentials = true
+
+    return new Promise<{ success: boolean; message?: string }>((resolve, reject) => {
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable && onProgress) {
+          onProgress((e.loaded / e.total) * 100)
+        }
+      }
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(JSON.parse(xhr.responseText))
+        } else {
+          reject(new ApiError(xhr.status, 'Upload failed'))
+        }
+      }
+
+      xhr.onerror = () => reject(new ApiError(0, 'Network error'))
+      xhr.send(formData)
+    })
+  },
+
+  downloadDriveFile: (path: string) =>
+    `${API_BASE}/msd/drive/files${encodeDrivePath(path)}`,
+
+  deleteDriveFile: (path: string) =>
+    request<{ success: boolean }>(`/msd/drive/files${encodeDrivePath(path)}`, {
+      method: 'DELETE',
+    }),
+
+  createDirectory: (path: string) =>
+    request<{ success: boolean }>(`/msd/drive/mkdir${encodeDrivePath(path)}`, {
+      method: 'POST',
+    }),
+
+  downloadFromUrl: (url: string, filename?: string) =>
+    request<{
+      download_id: string
+      url: string
+      filename: string
+      bytes_downloaded: number
+      total_bytes: number | null
+      progress_pct: number | null
+      status: string
+      error: string | null
+    }>('/msd/images/download', {
+      method: 'POST',
+      body: JSON.stringify({ url, filename }),
+    }),
+
+  cancelDownload: (downloadId: string) =>
+    request<{ success: boolean }>('/msd/images/download/cancel', {
+      method: 'POST',
+      body: JSON.stringify({ download_id: downloadId }),
+    }),
+}
+
+interface SerialDeviceOption {
+  path: string
+  name: string
+}
+
+function encodeDrivePath(path: string): string {
+  if (path === '' || path === '/') {
+    return '/'
+  }
+
+  const hasLeadingSlash = path.startsWith('/')
+  const hasTrailingSlash = path.endsWith('/')
+  const encodedSegments = path
+    .split('/')
+    .filter(Boolean)
+    .map(segment => encodeURIComponent(segment))
+    .join('/')
+
+  return `${hasLeadingSlash ? '/' : ''}${encodedSegments}${hasTrailingSlash ? '/' : ''}`
+}
+
+function getSerialDevicePriority(path: string): number {
+  if (/^\/dev\/ttyUSB/i.test(path)) return 0
+  if (/^\/dev\/(ttyS|S)/i.test(path)) return 2
+  return 1
+}
+
+function sortSerialDevices(serialDevices: SerialDeviceOption[]): SerialDeviceOption[] {
+  return [...serialDevices].sort((a, b) => {
+    const priorityDiff = getSerialDevicePriority(a.path) - getSerialDevicePriority(b.path)
+    if (priorityDiff !== 0) return priorityDiff
+    return a.path.localeCompare(b.path, undefined, { numeric: true, sensitivity: 'base' })
+  })
+}
+
+export const configApi = {
+  listDevices: async () => {
+    const result = await request<{
+      video: Array<{
+        path: string
+        name: string
+        driver: string
+        formats: Array<{
+          format: string
+          description: string
+          resolutions: Array<{
+            width: number
+            height: number
+            fps: number[]
+          }>
+        }>
+        usb_bus: string | null
+        has_signal: boolean
+      }>
+      serial: Array<{ path: string; name: string }>
+      audio: Array<{
+        name: string
+        description: string
+        is_hdmi: boolean
+        usb_bus: string | null
+      }>
+      udc: Array<{ name: string }>
+      extensions: {
+        ttyd_available: boolean
+        rustdesk_available: boolean
+      }
+    }>('/devices')
+
+    return {
+      ...result,
+      serial: sortSerialDevices(result.serial),
+    }
+  },
+}
+
+export {
+  authConfigApi,
+  videoConfigApi,
+  streamConfigApi,
+  hidConfigApi,
+  msdConfigApi,
+  atxConfigApi,
+  audioConfigApi,
+  extensionsApi,
+  redfishConfigApi,
+  rustdeskConfigApi,
+  rtspConfigApi,
+  vncConfigApi,
+  webConfigApi,
+  type RustDeskConfigResponse,
+  type RustDeskStatusResponse,
+  type RustDeskConfigUpdate,
+  type RustDeskPasswordResponse,
+  type RtspConfigResponse,
+  type RedfishConfigResponse,
+  type RedfishConfigUpdate,
+  type RtspConfigUpdate,
+  type RtspStatusResponse,
+  type VncConfigResponse,
+  type VncConfigUpdate,
+  type VncEncoding,
+  type VncStatusResponse,
+  type WebConfig,
+  type WebConfigUpdate,
+} from './config'
+
+export type {
+  AppConfig,
+  AuthConfig,
+  AuthConfigUpdate,
+  VideoConfig,
+  VideoConfigUpdate,
+  StreamConfig,
+  StreamConfigUpdate,
+  HidConfig,
+  HidConfigUpdate,
+  MsdConfig,
+  MsdConfigUpdate,
+  AtxConfig,
+  AtxConfigUpdate,
+  AudioConfig,
+  AudioConfigUpdate,
+  HidBackend,
+  StreamMode,
+  EncoderType,
+  BitratePreset,
+} from '@/types/generated'
+
+export const audioApi = {
+  status: () =>
+    request<{
+      enabled: boolean
+      streaming: boolean
+      device: string | null
+      sample_rate: number
+      channels: number
+      quality: string
+      subscriber_count: number
+      frames_encoded: number
+      bytes_output: number
+      error: string | null
+    }>('/audio/status'),
+
+  start: () =>
+    request<{ success: boolean }>('/audio/start', { method: 'POST' }),
+
+  stop: () =>
+    request<{ success: boolean }>('/audio/stop', { method: 'POST' }),
+
+  setQuality: (quality: 'voice' | 'balanced' | 'high') =>
+    request<{ success: boolean }>('/audio/quality', {
+      method: 'POST',
+      body: JSON.stringify({ quality }),
+    }),
+
+  selectDevice: (device: string) =>
+    request<{ success: boolean }>('/audio/device', {
+      method: 'POST',
+      body: JSON.stringify({ device }),
+    }),
+}
+
+export interface UsbDeviceInfo {
+  bus_num: number
+  dev_num: number
+  id_vendor: string
+  id_product: string
+  product?: string
+  manufacturer?: string
+  speed?: string
+  authorized?: boolean
+  video_device?: string
+}
+
+export const usbApi = {
+  listDevices: () =>
+    request<UsbDeviceInfo[]>('/devices/usb'),
+
+  resetDevice: (busNum: number, devNum: number) =>
+    request<{ success: boolean; message: string }>('/devices/usb/reset', {
+      method: 'POST',
+      body: JSON.stringify({ bus_num: busNum, dev_num: devNum }),
+    }),
+}
+
+export { ApiError }

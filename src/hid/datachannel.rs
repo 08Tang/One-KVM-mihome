@@ -1,0 +1,254 @@
+//! DataChannel HID message parsing and handling
+//!
+//! Binary message format:
+//! - Byte 0: Message type
+//!   - 0x01: Keyboard event
+//!   - 0x02: Mouse event
+//!   - 0x03: Consumer control event (multimedia keys)
+//! - Remaining bytes: Event data
+//!
+//! Keyboard event (type 0x01):
+//! - Byte 1: Event type (0x00 = down, 0x01 = up)
+//! - Byte 2: Canonical key code (stable One-KVM key id aligned with HID usage)
+//! - Byte 3: Modifiers bitmask
+//!   - Bit 0: Left Ctrl
+//!   - Bit 1: Left Shift
+//!   - Bit 2: Left Alt
+//!   - Bit 3: Left Meta
+//!   - Bit 4: Right Ctrl
+//!   - Bit 5: Right Shift
+//!   - Bit 6: Right Alt
+//!   - Bit 7: Right Meta
+//!
+//! Mouse event (type 0x02):
+//! - Byte 1: Event type
+//!   - 0x00: Move (relative)
+//!   - 0x01: MoveAbs (absolute)
+//!   - 0x02: Down
+//!   - 0x03: Up
+//!   - 0x04: Scroll
+//! - Bytes 2-3: X coordinate (i16 LE for relative, u16 LE for absolute)
+//! - Bytes 4-5: Y coordinate (i16 LE for relative, u16 LE for absolute)
+//! - Byte 6: Button (0=left, 1=middle, 2=right) or Scroll delta (i8)
+//!
+//! Consumer control event (type 0x03):
+//! - Bytes 1-2: Usage code (u16 LE)
+
+use tracing::warn;
+
+use super::types::ConsumerEvent;
+use super::{
+    CanonicalKey, KeyEventType, KeyboardEvent, KeyboardModifiers, MouseButton, MouseEvent,
+    MouseEventType,
+};
+
+pub const MSG_KEYBOARD: u8 = 0x01;
+pub const MSG_MOUSE: u8 = 0x02;
+pub const MSG_CONSUMER: u8 = 0x03;
+
+pub const KB_EVENT_DOWN: u8 = 0x00;
+pub const KB_EVENT_UP: u8 = 0x01;
+
+pub const MS_EVENT_MOVE: u8 = 0x00;
+pub const MS_EVENT_MOVE_ABS: u8 = 0x01;
+pub const MS_EVENT_DOWN: u8 = 0x02;
+pub const MS_EVENT_UP: u8 = 0x03;
+pub const MS_EVENT_SCROLL: u8 = 0x04;
+
+#[derive(Debug, Clone)]
+pub enum HidChannelEvent {
+    Keyboard(KeyboardEvent),
+    Mouse(MouseEvent),
+    Consumer(ConsumerEvent),
+}
+
+pub fn parse_hid_message(data: &[u8]) -> Option<HidChannelEvent> {
+    if data.is_empty() {
+        warn!("Empty HID message");
+        return None;
+    }
+
+    let msg_type = data[0];
+
+    match msg_type {
+        MSG_KEYBOARD => parse_keyboard_message(&data[1..]),
+        MSG_MOUSE => parse_mouse_message(&data[1..]),
+        MSG_CONSUMER => parse_consumer_message(&data[1..]),
+        _ => {
+            warn!("Unknown HID message type: 0x{:02X}", msg_type);
+            None
+        }
+    }
+}
+
+fn parse_keyboard_message(data: &[u8]) -> Option<HidChannelEvent> {
+    if data.len() < 3 {
+        warn!("Keyboard message too short: {} bytes", data.len());
+        return None;
+    }
+
+    let event_type = match data[0] {
+        KB_EVENT_DOWN => KeyEventType::Down,
+        KB_EVENT_UP => KeyEventType::Up,
+        _ => {
+            warn!("Unknown keyboard event type: 0x{:02X}", data[0]);
+            return None;
+        }
+    };
+
+    let key = match CanonicalKey::from_hid_usage(data[1]) {
+        Some(key) => key,
+        None => {
+            warn!("Unknown canonical keyboard key code: 0x{:02X}", data[1]);
+            return None;
+        }
+    };
+    let modifiers_byte = data[2];
+
+    let modifiers = KeyboardModifiers {
+        left_ctrl: modifiers_byte & 0x01 != 0,
+        left_shift: modifiers_byte & 0x02 != 0,
+        left_alt: modifiers_byte & 0x04 != 0,
+        left_meta: modifiers_byte & 0x08 != 0,
+        right_ctrl: modifiers_byte & 0x10 != 0,
+        right_shift: modifiers_byte & 0x20 != 0,
+        right_alt: modifiers_byte & 0x40 != 0,
+        right_meta: modifiers_byte & 0x80 != 0,
+    };
+
+    Some(HidChannelEvent::Keyboard(KeyboardEvent {
+        event_type,
+        key,
+        modifiers,
+    }))
+}
+
+fn parse_mouse_message(data: &[u8]) -> Option<HidChannelEvent> {
+    if data.len() < 6 {
+        warn!("Mouse message too short: {} bytes", data.len());
+        return None;
+    }
+
+    let event_type = match data[0] {
+        MS_EVENT_MOVE => MouseEventType::Move,
+        MS_EVENT_MOVE_ABS => MouseEventType::MoveAbs,
+        MS_EVENT_DOWN => MouseEventType::Down,
+        MS_EVENT_UP => MouseEventType::Up,
+        MS_EVENT_SCROLL => MouseEventType::Scroll,
+        _ => {
+            warn!("Unknown mouse event type: 0x{:02X}", data[0]);
+            return None;
+        }
+    };
+
+    let x = i16::from_le_bytes([data[1], data[2]]) as i32;
+    let y = i16::from_le_bytes([data[3], data[4]]) as i32;
+
+    let (button, scroll) = match event_type {
+        MouseEventType::Down | MouseEventType::Up => {
+            let btn = match data[5] {
+                0 => Some(MouseButton::Left),
+                1 => Some(MouseButton::Middle),
+                2 => Some(MouseButton::Right),
+                3 => Some(MouseButton::Back),
+                4 => Some(MouseButton::Forward),
+                _ => Some(MouseButton::Left),
+            };
+            (btn, 0i8)
+        }
+        MouseEventType::Scroll => (None, data[5] as i8),
+        _ => (None, 0i8),
+    };
+
+    Some(HidChannelEvent::Mouse(MouseEvent {
+        event_type,
+        x,
+        y,
+        button,
+        scroll,
+    }))
+}
+
+fn parse_consumer_message(data: &[u8]) -> Option<HidChannelEvent> {
+    if data.len() < 2 {
+        warn!("Consumer message too short: {} bytes", data.len());
+        return None;
+    }
+
+    let usage = u16::from_le_bytes([data[0], data[1]]);
+
+    Some(HidChannelEvent::Consumer(ConsumerEvent { usage }))
+}
+
+pub fn encode_keyboard_event(event: &KeyboardEvent) -> Vec<u8> {
+    let event_type = match event.event_type {
+        KeyEventType::Down => KB_EVENT_DOWN,
+        KeyEventType::Up => KB_EVENT_UP,
+    };
+
+    let modifiers = event.modifiers.to_hid_byte();
+
+    vec![
+        MSG_KEYBOARD,
+        event_type,
+        event.key.to_hid_usage(),
+        modifiers,
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_keyboard_down() {
+        let data = [MSG_KEYBOARD, KB_EVENT_DOWN, 0x04, 0x01]; // A key with left ctrl
+        let event = parse_hid_message(&data).unwrap();
+
+        match event {
+            HidChannelEvent::Keyboard(kb) => {
+                assert!(matches!(kb.event_type, KeyEventType::Down));
+                assert_eq!(kb.key, CanonicalKey::KeyA);
+                assert!(kb.modifiers.left_ctrl);
+                assert!(!kb.modifiers.left_shift);
+            }
+            _ => panic!("Expected keyboard event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_mouse_move() {
+        let data = [MSG_MOUSE, MS_EVENT_MOVE, 0x0A, 0x00, 0xF6, 0xFF, 0x00]; // x=10, y=-10
+        let event = parse_hid_message(&data).unwrap();
+
+        match event {
+            HidChannelEvent::Mouse(ms) => {
+                assert!(matches!(ms.event_type, MouseEventType::Move));
+                assert_eq!(ms.x, 10);
+                assert_eq!(ms.y, -10);
+            }
+            _ => panic!("Expected mouse event"),
+        }
+    }
+
+    #[test]
+    fn test_encode_keyboard() {
+        let event = KeyboardEvent {
+            event_type: KeyEventType::Down,
+            key: CanonicalKey::KeyA,
+            modifiers: KeyboardModifiers {
+                left_ctrl: true,
+                left_shift: false,
+                left_alt: false,
+                left_meta: false,
+                right_ctrl: false,
+                right_shift: false,
+                right_alt: false,
+                right_meta: false,
+            },
+        };
+
+        let encoded = encode_keyboard_event(&event);
+        assert_eq!(encoded, vec![MSG_KEYBOARD, KB_EVENT_DOWN, 0x04, 0x01]);
+    }
+}
