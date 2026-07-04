@@ -39,6 +39,7 @@ import {
   Terminal,
   MoreHorizontal,
   Bot,
+  Home,
 } from 'lucide-vue-next'
 import PasteModal from '@/components/PasteModal.vue'
 import AtxPopover from '@/components/AtxPopover.vue'
@@ -46,6 +47,7 @@ import VideoConfigPopover, { type VideoMode } from '@/components/VideoConfigPopo
 import HidConfigPopover from '@/components/HidConfigPopover.vue'
 import AudioConfigPopover from '@/components/AudioConfigPopover.vue'
 import MsdDialog from '@/components/MsdDialog.vue'
+import MiHomeDialog from '@/components/MiHomeDialog.vue'
 
 const { t, locale } = useI18n()
 const router = useRouter()
@@ -87,6 +89,7 @@ const videoPopoverOpen = ref(false)
 const hidPopoverOpen = ref(false)
 const audioPopoverOpen = ref(false)
 const msdDialogOpen = ref(false)
+const mihomeDialogOpen = ref(false)
 
 const mobileAtxOpen = ref(false)
 const mobilePasteOpen = ref(false)
@@ -124,7 +127,7 @@ let resizeObserver: ResizeObserver | null = null
 
 type CollapsibleItem =
   | 'video' | 'audio' | 'hid'
-  | 'msd' | 'atx' | 'paste'
+  | 'msd' | 'atx' | 'mihome' | 'paste'
   | 'stats' | 'terminal' | 'settings'
 
 interface ItemSpec {
@@ -138,6 +141,7 @@ const ITEM_SPECS: ItemSpec[] = [
   { id: 'hid',       side: 'left' },
   { id: 'msd',       side: 'left' },
   { id: 'atx',       side: 'left' },
+  { id: 'mihome',    side: 'left' },
   { id: 'paste',     side: 'left' },
   { id: 'stats',     side: 'right' },
   { id: 'terminal',  side: 'right' },
@@ -306,6 +310,23 @@ const hasOverflow = computed(() => {
           </Popover>
         </div>
 
+        <!-- MiHome - Adaptive -->
+        <div v-if="isVisible('mihome')">
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger as-child>
+                <Button variant="ghost" size="sm" class="h-8 gap-1.5 text-xs" @click="mihomeDialogOpen = true">
+                  <Home class="h-4 w-4" />
+                  <span v-if="visibleSet.get('mihome') === 'label'">{{ t('actionbar.mihome') }}</span>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>
+                <p>{{ t('actionbar.mihomeTip') }}</p>
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        </div>
+
         <!-- Paste Text - Adaptive -->
         <div v-if="isVisible('paste')">
           <Popover v-model:open="pasteOpen">
@@ -463,13 +484,19 @@ const hasOverflow = computed(() => {
               {{ t('actionbar.power') }}
             </DropdownMenuItem>
 
+            <!-- MiHome -->
+            <DropdownMenuItem v-if="!isVisible('mihome')" @click="openFromOverflow(() => mihomeDialogOpen = true)">
+              <Home class="h-4 w-4 mr-2" />
+              {{ t('actionbar.mihome') }}
+            </DropdownMenuItem>
+
             <!-- Paste -->
             <DropdownMenuItem v-if="!isVisible('paste')" @click="openMobilePaste">
               <ClipboardPaste class="h-4 w-4 mr-2" />
               {{ t('actionbar.paste') }}
             </DropdownMenuItem>
 
-            <DropdownMenuSeparator v-if="(!isVisible('msd') || !isVisible('atx') || !isVisible('paste')) && (!isVisible('stats') || (props.showTerminal !== false && !isVisible('terminal')) || !isVisible('settings'))" />
+            <DropdownMenuSeparator v-if="(!isVisible('msd') || !isVisible('atx') || !isVisible('mihome') || !isVisible('paste')) && (!isVisible('stats') || (props.showTerminal !== false && !isVisible('terminal')) || !isVisible('settings'))" />
 
             <!-- Stats -->
             <DropdownMenuItem v-if="!isVisible('stats')" @click="openFromOverflow(() => emit('toggleStats'))">
@@ -500,6 +527,9 @@ const hasOverflow = computed(() => {
 
   <!-- MSD Dialog -->
   <MsdDialog v-if="showMsd" v-model:open="msdDialogOpen" />
+
+  <!-- MiHome Dialog -->
+  <MiHomeDialog v-model:open="mihomeDialogOpen" />
 
   <!-- Mobile ATX Sheet — used when ATX is opened from the overflow menu.
        A Sheet avoids the Popover anchor-positioning issues on mobile. -->
@@ -548,6 +578,9 @@ const hasOverflow = computed(() => {
       <!-- ATX -->
       <Button data-measure="atx-icon" variant="ghost" size="sm" class="h-8 gap-1.5 text-xs"><Power class="h-4 w-4" /></Button>
       <Button data-measure="atx-label" variant="ghost" size="sm" class="h-8 gap-1.5 text-xs"><Power class="h-4 w-4" />{{ t('actionbar.power') }}</Button>
+      <!-- MiHome -->
+      <Button data-measure="mihome-icon" variant="ghost" size="sm" class="h-8 gap-1.5 text-xs"><Home class="h-4 w-4" /></Button>
+      <Button data-measure="mihome-label" variant="ghost" size="sm" class="h-8 gap-1.5 text-xs"><Home class="h-4 w-4" />{{ t('actionbar.mihome') }}</Button>
       <!-- Paste -->
       <Button data-measure="paste-icon" variant="ghost" size="sm" class="h-8 gap-1.5 text-xs"><ClipboardPaste class="h-4 w-4" /></Button>
       <Button data-measure="paste-label" variant="ghost" size="sm" class="h-8 gap-1.5 text-xs"><ClipboardPaste class="h-4 w-4" />{{ t('actionbar.paste') }}</Button>

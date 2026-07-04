@@ -156,6 +156,8 @@ export default {
     relative: 'Relative',
     applying: 'Applying...',
     audioConfig: 'Audio',
+    mihome: 'MiHome',
+    mihomeTip: 'MiHome smart control panel',
     playbackControl: 'Playback',
     volume: 'Volume',
     mute: 'Mute',
@@ -487,6 +489,9 @@ export default {
     driveCreated: 'Virtual drive created ({size} MB)',
     fileDeleted: 'File deleted',
     imageDeleted: 'Image deleted',
+  },
+  mihome: {
+    title: 'MiHome',
   },
   settings: {
     title: 'Settings',

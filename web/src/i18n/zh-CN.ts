@@ -156,6 +156,8 @@ export default {
     relative: '相对定位',
     applying: '应用中...',
     audioConfig: '音频',
+    mihome: '米家',
+    mihomeTip: '米家智能控制面板',
     playbackControl: '播放控制',
     volume: '音量',
     mute: '静音',
@@ -486,6 +488,9 @@ export default {
     driveCreated: '虚拟驱动器已创建 ({size} MB)',
     fileDeleted: '文件已删除',
     imageDeleted: '镜像已删除',
+  },
+  mihome: {
+    title: '米家',
   },
   settings: {
     title: '系统设置',
