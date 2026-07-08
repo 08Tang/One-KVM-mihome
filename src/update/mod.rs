@@ -11,7 +11,7 @@ use tokio::sync::{broadcast, RwLock, Semaphore};
 use crate::error::{AppError, Result};
 use crate::state::ShutdownAction;
 
-const DEFAULT_UPDATE_BASE_URL: &str = "https://update.one-kvm.cn";
+const DEFAULT_UPDATE_BASE_URL: &str = "https://clccv.com/one-kvm";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -432,8 +432,8 @@ impl UpdateService {
     }
 
     async fn fetch_manifests(&self) -> Result<(ChannelsManifest, ReleasesManifest)> {
-        let channels = self.fetch_json("/v1/channels.json").await?;
-        let releases = self.fetch_json("/v1/releases.json").await?;
+        let channels = self.fetch_json("/channels.json").await?;
+        let releases = self.fetch_json("/releases.json").await?;
         Ok((channels, releases))
     }
 

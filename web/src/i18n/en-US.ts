@@ -156,6 +156,8 @@ export default {
     relative: 'Relative',
     applying: 'Applying...',
     audioConfig: 'Audio',
+    mihome: 'MiHome',
+    mihomeTip: 'MiHome smart control panel',
     playbackControl: 'Playback',
     volume: 'Volume',
     mute: 'Mute',
@@ -492,6 +494,9 @@ export default {
     driveUnreadable: 'Format unsupported',
     driveUnreadableTooltip: 'Unable to parse the exFAT filesystem. It may have been formatted with an unsupported format.',
     reinitializeDrive: 'Re-initialize',
+  },
+  mihome: {
+    title: 'MiHome',
   },
   settings: {
     title: 'Settings',

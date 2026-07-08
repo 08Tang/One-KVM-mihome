@@ -575,8 +575,8 @@ const stepIcons = [User, Video, Keyboard, Puzzle]
 </script>
 
 <template>
-  <div class="min-h-screen min-h-dvh flex items-start sm:items-center justify-center bg-background px-4 py-6 sm:py-10">
-    <Card class="w-full max-w-lg relative">
+  <div class="min-h-screen min-h-dvh flex items-start sm:items-center justify-center px-4 py-6 sm:py-10">
+    <Card class="w-full max-w-lg relative glass-card rounded-2xl">
       <!-- Language Switcher -->
       <div class="absolute top-4 right-4">
         <LanguageToggleButton />

@@ -58,8 +58,8 @@ async function handleLogin() {
 </script>
 
 <template>
-  <div class="min-h-screen min-h-dvh flex items-center justify-center bg-background p-4">
-    <Card class="relative w-full max-w-sm">
+  <div class="min-h-screen min-h-dvh flex items-center justify-center p-4">
+    <Card class="relative w-full max-w-sm glass-card rounded-2xl">
       <div class="absolute top-4 right-4">
         <LanguageToggleButton />
       </div>

@@ -2720,8 +2720,8 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="h-screen h-dvh flex flex-col bg-background">
-    <header class="shrink-0 border-b border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+  <div class="h-screen h-dvh flex flex-col">
+    <header class="shrink-0 glass-actionbar">
       <div class="px-2 sm:px-4">
         <div class="h-10 sm:h-14 flex items-center justify-between">
           <div class="flex items-center gap-2 sm:gap-6">

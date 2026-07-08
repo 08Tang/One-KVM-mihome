@@ -43,6 +43,15 @@
   --keyboard-button-color: #1f2937;
   --keyboard-button-border: #e5e7eb;
   --keyboard-button-hover-bg: #f3f4f6;
+  /* Glass morphism variables - light mode */
+  --glass-bg: rgba(255, 255, 255, 0.65);
+  --glass-bg-strong: rgba(255, 255, 255, 0.8);
+  --glass-border: rgba(255, 255, 255, 0.5);
+  --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.08);
+  --glass-shadow-hover: 0 12px 40px rgba(0, 0, 0, 0.12);
+  --bg-gradient-1: oklch(96% 0.02 250);
+  --bg-gradient-2: oklch(98% 0.015 200);
+  --bg-gradient-3: oklch(97% 0.018 300);
 }
 
 .dark {
@@ -78,6 +87,15 @@
   --sidebar-accent-foreground: oklch(98.48% 0 0);
   --sidebar-border: oklch(26.98% 0.005 286.03);
   --sidebar-ring: oklch(83.91% 0.018 227.91);
+  /* Glass morphism variables - dark mode */
+  --glass-bg: rgba(20, 20, 25, 0.6);
+  --glass-bg-strong: rgba(20, 20, 25, 0.75);
+  --glass-border: rgba(255, 255, 255, 0.1);
+  --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  --glass-shadow-hover: 0 12px 40px rgba(0, 0, 0, 0.4);
+  --bg-gradient-1: oklch(18% 0.02 280);
+  --bg-gradient-2: oklch(15% 0.015 300);
+  --bg-gradient-3: oklch(16% 0.018 250);
 }
 
 /* Register theme variables with Tailwind v4 */
@@ -134,4 +152,100 @@ body {
 
 #app {
   min-height: 100vh;
+}
+
+body {
+  background:
+    radial-gradient(ellipse at top left, var(--bg-gradient-1) 0%, transparent 50%),
+    radial-gradient(ellipse at top right, var(--bg-gradient-2) 0%, transparent 50%),
+    radial-gradient(ellipse at bottom, var(--bg-gradient-3) 0%, transparent 60%),
+    var(--background);
+  background-attachment: fixed;
+}
+
+.glass-card {
+  background: var(--glass-bg);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow);
+  transition: box-shadow 0.3s ease, transform 0.2s ease;
+}
+
+.glass-card:hover {
+  box-shadow: var(--glass-shadow-hover);
+}
+
+.glass-button {
+  background: var(--glass-bg);
+  backdrop-filter: blur(12px) saturate(180%);
+  -webkit-backdrop-filter: blur(12px) saturate(180%);
+  border: 1px solid var(--glass-border);
+  transition: all 0.2s ease;
+}
+
+.glass-button:hover {
+  background: var(--glass-bg-strong);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1);
+  transform: translateY(-1px);
+}
+
+.glass-button:active {
+  transform: translateY(0);
+}
+
+.glass-input {
+  background: var(--glass-bg);
+  backdrop-filter: blur(8px) saturate(180%);
+  -webkit-backdrop-filter: blur(8px) saturate(180%);
+  border: 1px solid var(--glass-border);
+  transition: all 0.2s ease;
+}
+
+.glass-input:focus {
+  background: var(--glass-bg-strong);
+  box-shadow: 0 0 0 3px rgba(var(--ring), 0.2);
+}
+
+.glass-dialog {
+  background: var(--glass-bg-strong);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow);
+}
+
+.glass-popover {
+  background: var(--glass-bg-strong);
+  backdrop-filter: blur(16px) saturate(180%);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow);
+}
+
+.glass-sidebar {
+  background: var(--glass-bg);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border-right: 1px solid var(--glass-border);
+}
+
+.glass-actionbar {
+  background: var(--glass-bg);
+  backdrop-filter: blur(16px) saturate(180%);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  border-bottom: 1px solid var(--glass-border);
+}
+
+@supports not (backdrop-filter: blur(10px)) {
+  .glass-card,
+  .glass-button,
+  .glass-input,
+  .glass-dialog,
+  .glass-popover,
+  .glass-sidebar,
+  .glass-actionbar {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
 }

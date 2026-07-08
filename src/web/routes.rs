@@ -308,12 +308,22 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             auth_middleware,
         ));
 
+    // MiHome proxy at root level - forwards /mihome to http://127.0.0.1:7123/webui
+    let mihome_routes = Router::new()
+        .route("/mihome", any(handlers::mihome::mihome_proxy))
+        .route("/mihome/{*path}", any(handlers::mihome::mihome_proxy))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ));
+
     // Static file serving
     let static_routes = super::static_files::static_file_router();
 
     // Main router
     let main_router = Router::new()
         .nest("/api", api_routes)
+        .merge(mihome_routes)
         .merge(static_routes)
         .layer(TraceLayer::new_for_http())
         .layer(cors)

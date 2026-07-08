@@ -2724,7 +2724,7 @@ watch(isWindows, () => {
       </div>
 
       <!-- Desktop Sidebar -->
-      <aside class="hidden lg:block w-64 shrink-0 border-r bg-muted/30 overflow-hidden">
+      <aside class="hidden lg:block w-64 shrink-0 glass-sidebar overflow-hidden">
         <div class="h-full p-6 space-y-6 overflow-y-auto">
           <div class="space-y-1">
             <h1 class="text-xl font-semibold tracking-tight">{{ t('settings.title') }}</h1>
@@ -5198,6 +5198,41 @@ watch(isWindows, () => {
 
           <!-- About Section -->
           <div v-show="activeSection === 'about'" class="space-y-6">
+            <Card>
+              <CardHeader>
+                <CardTitle>关于程序</CardTitle>
+                <CardDescription>程序介绍</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div class="space-y-3">
+                  <div class="flex justify-between items-center py-2 border-b gap-2">
+                    <span class="text-sm text-muted-foreground shrink-0">项目名称</span>
+                    <span class="text-sm font-medium truncate">One-KVM-mihome</span>
+                  </div>
+                  <div class="flex justify-between items-center py-2 border-b gap-2">
+                    <span class="text-sm text-muted-foreground shrink-0">项目介绍</span>
+                    <span class="text-sm font-medium truncate max-w-[60%] text-right">One-KVM 米家版，基于原版 One-KVM 二创</span>
+                  </div>
+                  <div class="flex justify-between items-center py-2 border-b gap-2">
+                    <span class="text-sm text-muted-foreground shrink-0">项目地址</span>
+                    <a href="https://github.com/08Tang/One-KVM-mihome" target="_blank" class="text-sm font-medium text-blue-600 hover:text-blue-700 truncate max-w-[60%] text-right">https://github.com/08Tang/One-KVM-mihome</a>
+                  </div>
+                  <div class="flex justify-between items-center py-2 border-b gap-2">
+                    <span class="text-sm text-muted-foreground shrink-0">项目原创</span>
+                    <a href="https://github.com/mofeng-git/One-KVM" target="_blank" class="text-sm font-medium text-blue-600 hover:text-blue-700 truncate max-w-[60%] text-right">https://github.com/mofeng-git/One-KVM</a>
+                  </div>
+                  <div class="flex justify-between items-center py-2 border-b gap-2">
+                    <span class="text-sm text-muted-foreground shrink-0">二创作者</span>
+                    <span class="text-sm font-medium truncate">TKexig</span>
+                  </div>
+                  <div class="flex justify-between items-center py-2 gap-2">
+                    <span class="text-sm text-muted-foreground shrink-0">原创作者</span>
+                    <span class="text-sm font-medium truncate">SilentWind</span>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
             <Card v-if="!isAndroid">
               <CardHeader class="flex flex-row items-start justify-between space-y-0">
                 <div class="space-y-1.5">
@@ -5320,7 +5355,7 @@ watch(isWindows, () => {
               </CardContent>
             </Card>
 
-            <p class="text-xs text-muted-foreground text-center">@2025-2026 SilentWind</p>
+            <p class="text-xs text-muted-foreground text-center">@2025-2026 TKexig and SilentWind</p>
           </div>
 
           <!-- Save Button (sticky) -->
