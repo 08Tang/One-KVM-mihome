@@ -4,6 +4,7 @@
 
   <p><a href="README.md">简体中文</a> · <a href="README.en.md">English</a></p>
 
+  [![GitHub Release](https://img.shields.io/github/v/release/08Tang/One-KVM-mihome)](https://github.com/08Tang/One-KVM-mihome/releases)
   [![GitHub stars](https://img.shields.io/github/stars/08Tang/One-KVM-mihome?style=social)](https://github.com/08Tang/One-KVM-mihome/stargazers)
   [![GitHub forks](https://img.shields.io/github/forks/08Tang/One-KVM-mihome?style=social)](https://github.com/08Tang/One-KVM-mihome/network/members)
   [![GitHub issues](https://img.shields.io/github/issues/08Tang/One-KVM-mihome)](https://github.com/08Tang/One-KVM-mihome/issues)
