@@ -98,8 +98,10 @@ const mihomeOpen = ref(false)
 
 const mobileAtxOpen = ref(false)
 const mobilePasteOpen = ref(false)
+const mobileMihomeOpen = ref(false)
 const mobileAtxOpenTime = ref(0)
 const mobilePasteOpenTime = ref(0)
+const mobileMihomeOpenTime = ref(0)
 
 const OPEN_GUARD_MS = 350
 
@@ -122,6 +124,11 @@ const openMobileAtx = () => openFromOverflow(() => {
 const openMobilePaste = () => openFromOverflow(() => {
   mobilePasteOpen.value = true
   mobilePasteOpenTime.value = Date.now()
+})
+
+const openMobileMihome = () => openFromOverflow(() => {
+  mobileMihomeOpen.value = true
+  mobileMihomeOpenTime.value = Date.now()
 })
 
 
@@ -499,7 +506,7 @@ const hasRightOverflow = computed(() => {
             </DropdownMenuItem>
 
             <!-- MiHome -->
-            <DropdownMenuItem v-if="mihomeEnabled && !isVisible('mihome')" @click="openFromOverflow(() => mihomeOpen = true)">
+            <DropdownMenuItem v-if="mihomeEnabled && !isVisible('mihome')" @click="openMobileMihome">
               <Home class="h-4 w-4 mr-2" />
               {{ t('actionbar.mihome') }}
             </DropdownMenuItem>
@@ -576,6 +583,22 @@ const hasRightOverflow = computed(() => {
         <SheetTitle>{{ t('actionbar.paste') }}</SheetTitle>
       </SheetHeader>
       <PasteModal @close="mobilePasteOpen = false" />
+    </SheetContent>
+  </Sheet>
+
+  <!-- Mobile MiHome Sheet — used when MiHome is opened from the overflow menu.
+       A Sheet avoids the Popover anchor-positioning issues on mobile. -->
+  <Sheet v-model:open="mobileMihomeOpen">
+    <SheetContent
+      side="bottom"
+      class="max-h-[90dvh] overflow-y-auto"
+      @pointer-down-outside="(e) => guardOutside(mobileMihomeOpenTime, e)"
+      @interact-outside="(e) => guardOutside(mobileMihomeOpenTime, e)"
+    >
+      <SheetHeader class="mb-2">
+        <SheetTitle>{{ t('actionbar.mihome') }}</SheetTitle>
+      </SheetHeader>
+      <MiHomeDialog :open="mobileMihomeOpen" @close="mobileMihomeOpen = false" />
     </SheetContent>
   </Sheet>
 
