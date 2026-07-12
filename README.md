@@ -1,246 +1,144 @@
 <div align="center">
-  <h1>One-KVM</h1>
-  <p><strong>Rust 编写的开放轻量 IP-KVM 解决方案，实现 BIOS 级远程管理</strong></p>
+  <h1>One-KVM-mihome</h1>
+  <p><strong>米家智能家居控制面板 + One-KVM</strong></p>
 
   <p><a href="README.md">简体中文</a> · <a href="README.en.md">English</a></p>
 
-  [![GitHub Release](https://img.shields.io/github/v/release/mofeng-git/One-KVM)](https://github.com/mofeng-git/One-KVM/releases)
-  [![GitHub stars](https://img.shields.io/github/stars/mofeng-git/One-KVM?style=social)](https://github.com/mofeng-git/One-KVM/stargazers)
-  [![GitHub forks](https://img.shields.io/github/forks/mofeng-git/One-KVM?style=social)](https://github.com/mofeng-git/One-KVM/network/members)
-  [![GitHub issues](https://img.shields.io/github/issues/mofeng-git/One-KVM)](https://github.com/mofeng-git/One-KVM/issues)
-</div>
-
----
-
-## 项目概述
-
-**One-KVM Rust** 是一个用 Rust 编写的轻量级 IP-KVM 解决方案，可通过网络远程管理服务器和工作站，实现 BIOS 级远程控制。
-
-项目目标：提供一个开放、轻量、易用的 IPKVM 解决方案。
-
-- **开放**：不绑定特定硬件配置，可在各类硬件环境中稳定运行。
-- **轻量**：以二进制文件形式分发，无繁杂的依赖项，部署过程简单。
-- **易用**：无需手动编辑配置文件，参数设置均可通过网页界面完成。
-
-更多内容可访问 [One-KVM Rust 文档站点](https://docs.one-kvm.cn/)。
-
-> **One-KVM Python** 已停止开发，如有需要可访问 <https://github.com/mofeng-git/One-KVM/tree/python>。
-
-<div align="center">
-
-![One-KVM Web 控制台界面](https://one-kvm.cn/hero-app-effect.png)
+[![GitHub stars](https://img.shields.io/github/stars/08Tang/One-KVM-mihome?style=social)](https://github.com/08Tang/One-KVM-mihome/stargazers)
+[![GitHub forks](https://img.shields.io/github/forks/08Tang/One-KVM-mihome?style=social)](https://github.com/08Tang/One-KVM-mihome/network/members)
+[![GitHub issues](https://img.shields.io/github/issues/08Tang/One-KVM-mihome)](https://github.com/08Tang/One-KVM-mihome/issues)
 
 </div>
 
-## 功能介绍
+***
 
-**核心功能**
+## ⚠️ 重要声明
 
-| 功能 | 能力说明 |
-|------|------|
-| 视频采集 | HDMI USB /MIPI CSI/RK3588 HDMI IN 采集支持，提供 MJPEG / WebRTC（H.264/H.265/VP8/VP9） 视频流|
-| 视频编码 | VAAPI/QSV/RKMPP/V4L2M2M 硬件编码支持，以及软件编码兜底 |
-| 键鼠控制 | USB OTG HID 或 CH340 + CH9329 HID，支持绝对/相对鼠标模式 |
-| 虚拟媒体 | USB Mass Storage，支持 ISO/IMG 镜像挂载和 Ventoy 虚拟U盘模式 |
-| ATX 电源控制 | GPIO/USB 继电器，支持电源控制 |
-| 音频传输 | ALSA 采集 + Opus 编码（HTTP/WebRTC） |
+本项目 **非 One-KVM 官方项目**，是基于 [One-KVM](https://github.com/mofeng-git/One-KVM) 的二次创作项目。
 
-## 安装使用
+**原版 One-KVM 地址**: <https://github.com/mofeng-git/One-KVM>
 
-构建产物见 [GitHub Releases](https://github.com/mofeng-git/One-KVM/releases)。以下为常见安装方式的简要步骤；**系统要求、硬件准备、Docker 环境变量与 USB OTG 等完整说明**请查阅 [One-KVM Rust 文档站点](https://docs.one-kvm.cn/)。
+**感谢**：感谢 [One-KVM](https://github.com/mofeng-git/One-KVM) 项目及其贡献者提供的优秀基础框架。
 
-### 使用 deb 安装（Debian / Ubuntu）
+***
 
-从 Releases 下载与本机架构匹配的 `one-kvm_*.deb`，在包所在目录执行：
+## 📖 项目概述
+
+**One-KVM-mihome** 在保留 [One-KVM](https://github.com/mofeng-git/One-KVM) IP-KVM 核心功能的基础上，新增了米家智能家居控制面板功能。
+
+- **米家智能家居控制面板**: Rust 编写的米家智能家居控制面板，实现智能设备远程控制
+- **One-KVM**: Rust 编写的开放轻量 IP-KVM 解决方案，实现 BIOS 级远程管理
+
+***
+
+## ✨ 米家智能家居控制面板
+
+### 功能特性
+
+| 功能         | 说明                                          |
+| ---------- | ------------------------------------------- |
+| Web 控制面板   | 基于浏览器的智能家居管理界面，支持密码登录                       |
+| 设备控制       | 远程控制米家智能设备，支持开关、参数设置                        |
+| API 接口     | 提供 RESTful API，支持 SHA256 签名验证               |
+| 多架构支持      | Linux (x86\_64/arm64/armv7) + Windows (x64) |
+| systemd 服务 | Linux 下支持开机自启                               |
+| 配置工具       | 独立的 `mihome-set` 命令行工具，交互式配置                |
+
+### 支持设备
+
+| 设备      | 型号                | 支持功能                                         |
+| ------- | ----------------- | -------------------------------------------- |
+| 米家智能插座3 | `cuco.plug.v3`    | 开关、实时功率(W)、设备温度(°)、耗电量(度)、故障状态、上电默认状态、指示灯、童锁 |
+| 开机卡     | `cddz.plug.pc01w` | 通电开机/断电关机、运行状况(9种状态)、上电默认状态、指示灯、电源开关、重启      |
+
+***
+
+## ⚡ 快速开始
+
+### 米家控制面板
+
+构建产物见 [MiHome-Rust Releases](https://github.com/08Tang/MiHome-Rust/releases)。以下为常见安装方式的简要步骤。
+
+#### 使用 deb 安装（Debian / Ubuntu）
+
+从 Releases 下载与本机架构匹配的 `mihome_*.deb`，在包所在目录执行：
 
 ```bash
 sudo apt update
-sudo apt install ./one-kvm_0.x.x_<arch>.deb
+sudo apt install ./mihome_0.x.x_<arch>.deb
 ```
 
-将文件名中的版本号与架构替换为实际下载的包名。
+将文件名中的版本号与架构替换为实际下载的包名。安装后 systemd 服务会自动启用并开机自启。
 
-### 使用 Docker
+**系统要求：**
 
-镜像分为 **one-kvm**（One-KVM 主程序 + ttyd）与 **one-kvm-full**（另含 gostc、easytier-core 等可选扩展），按需选用。
+| 架构              | deb 包名               | 最低系统要求                     |
+| --------------- | -------------------- | -------------------------- |
+| x86\_64 (amd64) | `mihome_*_amd64.deb` | Debian 11+ / Ubuntu 20.04+ |
+| ARM64 (arm64)   | `mihome_*_arm64.deb` | Debian 11+ / Ubuntu 20.04+ |
+| ARMv7 (armhf)   | `mihome_*_armhf.deb` | Debian 11+ / Ubuntu 20.04+ |
+
+**依赖：** libc6 >= 2.31，libssl1.1 >= 1.1.0 或 libssl3 >= 3.0.0
+
+#### Windows
+
+从 Releases 下载 `mihome-windows-x64.zip`，解压后直接运行。
+
+**系统要求：** Windows 10 (1809+) / Windows 11 / Windows Server 2019+
+
+Windows 版本为独立可执行文件，无需额外依赖。
+
+#### 配置（使用 mihome-set）
 
 ```bash
-docker run --name one-kvm -itd \
-  --privileged=true --restart unless-stopped \
-  -v /dev:/dev -v /sys:/sys \
-  --net=host \
-  silentwind0/one-kvm-full
+# 第一步：登录米家账号
+mihome-set login
+
+# 第二步：添加设备
+mihome-set add
+
+# 第三步：设置 API 密钥（建议随机）
+mihome-set api_key
+
+# 第四步（可选）：关闭 WebUI
+mihome-set webui off
 ```
 
-拉取较慢时，可将镜像名替换为阿里云加速，例如 `registry.cn-hangzhou.aliyuncs.com/silentwind/one-kvm-full`（`one-kvm` 镜像同理，将 `silentwind0/one-kvm` 换为 `registry.cn-hangzhou.aliyuncs.com/silentwind/one-kvm`）。
+Windows 用户使用 `.\mihome-set.exe` 替代 `mihome-set`。
 
-### 飞牛 NAS
+> 仅搭配 One-KVM-mihome 使用时建议关闭 Web 面板：`mihome-set webui off`
 
-One-KVM 已上架飞牛 **应用市场**，在 NAS 上直接搜索安装即可。
+### One-KVM 主程序
 
-### 访问 Web 与首次配置
+下载：[releases](https://github.com/08Tang/One-KVM-mihome/releases)  
+请访问 [One-KVM 官方仓库](https://github.com/mofeng-git/One-KVM) 获取使用说明。
 
-浏览器访问 `http://<设备 IP>:8080`（飞牛 NAS 安装后为 8420 端口）。首次访问将引导完成初始配置。
+***
 
-## 报告问题
+## 🔧 命令行工具 (mihome-set)
 
-如果您发现了问题，请：
-1. 使用 [GitHub Issues](https://github.com/mofeng-git/One-KVM/issues) 报告，或加入 QQ 群聊反馈。
-2. 提供有帮助的错误信息和复现步骤
-3. 包含您使用的软件版本、硬件配置和系统信息
+`mihome-set` 支持两种模式：**命令行模式**（带参数）和**交互模式**（不带参数）。
 
-## 赞助支持
+| 命令         | 说明                       | 示例                                             |
+| ---------- | ------------------------ | ---------------------------------------------- |
+| `login`    | 登录米家账号，保存认证信息到 auth.json | `mihome-set login`                             |
+| `list`     | 查看已配置的设备列表               | `mihome-set list`                              |
+| `add`      | 从米家账号获取设备列表，选择添加到控制列表    | `mihome-set add`                               |
+| `edit`     | 编辑已配置设备的名称               | `mihome-set edit`                              |
+| `delete`   | 删除已配置的设备                 | `mihome-set delete`                            |
+| `query`    | 查询设备实时状态（支持查询单个或全部）      | `mihome-set query`                             |
+| `types`    | 查看支持的设备类型及功能             | `mihome-set types`                             |
+| `password` | 修改 WebUI 登录密码（留空随机生成）    | `mihome-set password`                          |
+| `api_key`  | 修改 API 密钥（留空随机生成 32 位）   | `mihome-set api_key`                           |
+| `webui`    | 开启/关闭 WebUI              | `mihome-set webui on` 或 `mihome-set webui off` |
+| `help`     | 显示帮助信息                   | `mihome-set help`                              |
 
-本项目基于多个优秀开源项目进行二次开发，作者投入了大量时间进行测试和维护。如果您觉得这个项目有价值，欢迎通过 **[为爱发电](https://afdian.com/a/silentwind)** 支持项目发展。
+不带任何参数运行 `mihome-set`，进入交互模式，可循环执行命令，输入 `exit` 退出。
 
-### 感谢名单
+***
 
-<details>
-<summary><strong>点击查看感谢名单</strong></summary>
+## 🔗 相关链接
 
-- 浩龙的电子嵌入式之路
+- **One-KVM 官方**: <https://github.com/mofeng-git/One-KVM>
+- **One-KVM 文档**: <https://docs.one-kvm.cn/>
 
-- Tsuki
-
-- H_xiaoming
-
-- 0蓝蓝0
-
-- fairybl
-
-- Will
-
-- 自.知
-
-- 观棋不语٩ ི۶
-
-- 爱发电用户_a57a4
-
-- 爱发电用户_2c769
-
-- 霜序
-
-- 远方（闲鱼用户名：小远技术店铺）
-
-- 爱发电用户_399fc
-
-- 斐斐の
-
-- 爱发电用户_09451
-
-- 超高校级的錆鱼
-
-- 爱发电用户_08cff
-
-- guoke
-
-- mgt
-
-- 姜沢掵
-
-- ui_beam
-
-- 爱发电用户_c0dd7
-
-- 爱发电用户_dnjK
-
-- 忍者胖猪
-
-- 永遠の願い
-
-- 爱发电用户_GBrF
-
-- 爱发电用户_fd65c
-
-- 爱发电用户_vhNa
-
-- 爱发电用户_Xu6S
-
-- moss
-
-- woshididi
-
-- 爱发电用户_a0fd1
-
-- 爱发电用户_f6bH
-
-- 码农
-
-- 爱发电用户_6639f
-
-- jeron
-
-- 爱发电用户_CN7y
-
-- 爱发电用户_Up6w
-
-- 爱发电用户_e3202
-
-- 一语念白
-
-- 云边
-
-- 爱发电用户_5a711
-
-- 爱发电用户_9a706
-
-- T0m9ir1SUKI
-
-- 爱发电用户_56d52
-
-- 爱发电用户_3N6F
-
-- DUSK
-
-- 飘零
-
-- .
-
-- 饭太稀
-
-- 葱
-
-- MaxZ
-
-- 爱发电用户_c5f33
-
-- 爱发电用户_09386
-
-- 爱发电用户_JT6c
-
-- 爱发电用户_d3d9c
-
-- 爱发电用户_97b41
-
-- 偶然
-
-- 爱发电用户_dba45
-
-- 爱发电用户_d4f8b
-
-- 故人。
-
-- ......
-
-</details>
-
-### 赞助商
-
-本项目得到以下赞助商的支持：
-
-**文件存储服务：**
-- **[Huang1111公益计划](https://pan.huang1111.cn/s/mxkx3T1)** - 提供免登录下载服务
-
-**云服务商**
-
-- **[林枫云](https://www.dkdun.cn)** - 赞助了本项目服务器
-
-  <img  height="128" alt="林枫云" src="https://docs.one-kvm.cn/img/36076FEFF0898A80EBD5756D28F4076C.png" />
-
-  林枫云主营国内外地域的精品线路业务服务器、高主频游戏服务器和大带宽服务器。
-
-- **[贝塔网络](https://my.beita.cc/?ref=github_onekvm)** - 赞助了本项目服务器
-
-  <img height="128" alt="BTBT" src="https://github.com/user-attachments/assets/c442d5f5-d72f-4a07-b9f4-400a6a0c3f1e" />
-
-  远程电脑、消费级GPU服务器、独服物理机，全自动在线交付。

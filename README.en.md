@@ -1,251 +1,146 @@
 <div align="center">
-  <h1>One-KVM</h1>
-  <p><strong>An open, lightweight IP-KVM stack in Rust — remote management down to BIOS level</strong></p>
+  <h1>One-KVM-mihome</h1>
+  <p><strong>MiHome Smart Home Control Panel + One-KVM</strong></p>
 
   <p><a href="README.md">简体中文</a> · <a href="README.en.md">English</a></p>
 
-  [![GitHub Release](https://img.shields.io/github/v/release/mofeng-git/One-KVM)](https://github.com/mofeng-git/One-KVM/releases)
-  [![GitHub stars](https://img.shields.io/github/stars/mofeng-git/One-KVM?style=social)](https://github.com/mofeng-git/One-KVM/stargazers)
-  [![GitHub forks](https://img.shields.io/github/forks/mofeng-git/One-KVM?style=social)](https://github.com/mofeng-git/One-KVM/network/members)
-  [![GitHub issues](https://img.shields.io/github/issues/mofeng-git/One-KVM)](https://github.com/mofeng-git/One-KVM/issues)
+  [![GitHub stars](https://img.shields.io/github/stars/08Tang/One-KVM-mihome?style=social)](https://github.com/08Tang/One-KVM-mihome/stargazers)
+  [![GitHub forks](https://img.shields.io/github/forks/08Tang/One-KVM-mihome?style=social)](https://github.com/08Tang/One-KVM-mihome/network/members)
+  [![GitHub issues](https://img.shields.io/github/issues/08Tang/One-KVM-mihome)](https://github.com/08Tang/One-KVM-mihome/issues)
 </div>
 
----
+***
 
-## Overview
+## ⚠️ Important Notice
 
-**One-KVM (Rust)** is a lightweight IP-KVM solution written in Rust. It lets you manage servers and workstations over the network, including at BIOS level.
+This project is **NOT the official One-KVM project**, it is a fork based on [One-KVM](https://github.com/mofeng-git/One-KVM).
 
-Goals: an open, lightweight, easy-to-use IP-KVM stack.
+**Official One-KVM**: <https://github.com/mofeng-git/One-KVM>
 
-- **Open**: not tied to one hardware recipe; runs across many setups.
-- **Lightweight**: shipped as a binary with minimal moving parts for deployment.
-- **Easy to use**: no hand-edited config files required; settings are done in the web UI.
+**Thanks**: Special thanks to the [One-KVM](https://github.com/mofeng-git/One-KVM) project and its contributors for providing an excellent foundation.
 
-For more information, see the [One-KVM Rust documentation](https://docs.one-kvm.cn/).
+***
 
-> **One-KVM (Python)** is no longer maintained. If you still need it, see <https://github.com/mofeng-git/One-KVM/tree/python>.
+## 📖 Overview
 
-<div align="center">
+**One-KVM-mihome** adds MiHome (Xiaomi Smart Home) control panel functionality while preserving the core IP-KVM features of [One-KVM](https://github.com/mofeng-git/One-KVM).
 
-![One-KVM web console](https://one-kvm.cn/hero-app-effect.png)
+- **MiHome Control Panel**: A lightweight Xiaomi smart home control panel written in Rust for remote device management
+- **One-KVM**: Rust-based open, lightweight IP-KVM solution for BIOS-level remote management
 
-</div>
+***
 
-## Features
+## ✨ MiHome Smart Home Control Panel
 
-**Core**
+### Features
 
-| Area | Capabilities |
-|------|----------------|
-| Video capture | HDMI USB / MIPI CSI / RK3588 HDMI IN; MJPEG and WebRTC (H.264 / H.265 / VP8 / VP9) |
-| Video encoding | VAAPI / QSV / RKMPP / V4L2 M2M hardware paths, with software fallback |
-| Keyboard & mouse | USB OTG HID or CH340 + CH9329 HID; absolute / relative mouse |
-| Virtual media | USB mass storage; ISO/IMG mount and Ventoy-style virtual USB |
-| ATX power | GPIO or USB relay; power control |
-| Audio | ALSA capture + Opus (HTTP / WebRTC) |
+| Feature | Description |
+|---------|-------------|
+| Web Control Panel | Browser-based smart home management interface with password login |
+| Device Control | Remote control of Mijia smart devices with switch and parameter settings |
+| API Interface | RESTful API with SHA256 signature verification |
+| Multi-architecture | Linux (x86_64/arm64/armv7) + Windows (x64) |
+| systemd Service | Auto-start on boot for Linux |
+| Configuration Tool | Standalone `mihome-set` CLI tool with interactive mode |
 
-## Installation
+### Supported Devices
 
-Release artifacts are on [GitHub Releases](https://github.com/mofeng-git/One-KVM/releases). Below are short paths for common setups. For **system requirements, hardware, Docker env vars, USB OTG**, and full troubleshooting, see the [One-KVM documentation](https://docs.one-kvm.cn/) (Chinese; use a translator if needed).
+| Device | Model | Supported Functions |
+|--------|-------|---------------------|
+| Mijia Smart Plug 3 | `cuco.plug.v3` | Switch, real-time power (W), device temperature (°), energy consumption (kWh), fault status, default power-on state, indicator light, child lock |
+| Boot Card | `cddz.plug.pc01w` | Power on/off, running status (9 states), default power-on state, indicator light, power switch, restart |
 
-### Debian / Ubuntu (.deb)
+***
 
-Download a `one-kvm_*.deb` matching your CPU architecture from Releases, then from the directory containing the package:
+## ⚡ Quick Start
+
+### MiHome Control Panel
+
+Build artifacts are available on [MiHome-Rust Releases](https://github.com/08Tang/MiHome-Rust/releases). Below are brief installation steps for common methods.
+
+#### Install via deb (Debian / Ubuntu)
+
+Download the `mihome_*.deb` package matching your system architecture, then run in the package directory:
 
 ```bash
 sudo apt update
-sudo apt install ./one-kvm_0.x.x_<arch>.deb
+sudo apt install ./mihome_0.x.x_<arch>.deb
 ```
 
-Replace the version and architecture in the filename with your actual file name.
+Replace the version number and architecture with the actual downloaded package name. The systemd service will be automatically enabled and start on boot.
 
-### Docker
+**System Requirements:**
 
-Images:
+| Architecture | deb Package | Minimum System Requirement |
+|--------------|-------------|----------------------------|
+| x86_64 (amd64) | `mihome_*_amd64.deb` | Debian 11+ / Ubuntu 20.04+ |
+| ARM64 (arm64) | `mihome_*_arm64.deb` | Debian 11+ / Ubuntu 20.04+ |
+| ARMv7 (armhf) | `mihome_*_armhf.deb` | Debian 11+ / Ubuntu 20.04+ |
 
-- **one-kvm** — main app + ttyd  
-- **one-kvm-full** — same plus optional extras (e.g. gostc, easytier-core)
+**Dependencies:** libc6 >= 2.31, libssl1.1 >= 1.1.0 or libssl3 >= 3.0.0
 
-Example:
+#### Windows
+
+Download `mihome-windows-x64.zip` from Releases, extract and run directly.
+
+**System Requirements:** Windows 10 (1809+) / Windows 11 / Windows Server 2019+
+
+The Windows version is a standalone executable with no additional dependencies.
+
+#### Configuration (using mihome-set)
 
 ```bash
-docker run --name one-kvm -itd \
-  --privileged=true --restart unless-stopped \
-  -v /dev:/dev -v /sys:/sys \
-  --net=host \
-  silentwind0/one-kvm-full
+# Step 1: Log in to your Mijia account
+mihome-set login
+
+# Step 2: Add devices
+mihome-set add
+
+# Step 3: Set API key (random recommended)
+mihome-set api_key
+
+# Step 4 (optional): Disable WebUI
+mihome-set webui off
 ```
 
-If pulls are slow, use the Aliyun mirror, e.g. `registry.cn-hangzhou.aliyuncs.com/silentwind/one-kvm-full` (and `registry.cn-hangzhou.aliyuncs.com/silentwind/one-kvm` for the slim image).
+Windows users: use `.\mihome-set.exe` instead of `mihome-set`.
 
-### fnOS NAS (Feiniu / 飞牛)
+#### Accessing the Web Control Panel
 
-One-KVM is listed in the fnOS **app store**; search and install on your NAS.
+Open your browser and navigate to `http://<device IP>:7123/webui`. Default password: `123456` (change with `mihome-set password`).
 
-### Web UI and first run
+> When using with One-KVM-mihome only, it is recommended to disable the web panel: `mihome-set webui off`
 
-Open `http://<device-ip>:8080` in a browser (**8420** after fnOS install). The first visit runs initial setup.
+### One-KVM Core
 
-## Reporting issues
+Download: [releases](https://github.com/08Tang/One-KVM-mihome/releases)  
+Please visit the [Official One-KVM Repository](https://github.com/mofeng-git/One-KVM) for usage instructions.
 
-If something breaks:
+***
 
-1. Open [GitHub Issues](https://github.com/mofeng-git/One-KVM/issues) or report in the project QQ group.  
-2. Include **useful** error messages and steps to reproduce.  
-3. Mention software version, hardware, and OS details.
+## 🔧 CLI Tool (mihome-set)
 
-## Sponsorship
+`mihome-set` supports two modes: **CLI mode** (with arguments) and **interactive mode** (without arguments).
 
-One-KVM builds on many great open-source projects; a lot of time goes into testing and maintenance. If you find it useful, you can support development on **[Afdian (为爱发电)](https://afdian.com/a/silentwind)**.
+| Command | Description | Example |
+|---------|-------------|---------|
+| `login` | Log in to Mijia account, save auth info to auth.json | `mihome-set login` |
+| `list` | View configured device list | `mihome-set list` |
+| `add` | Fetch device list from Mijia account and add to control list | `mihome-set add` |
+| `edit` | Edit configured device name | `mihome-set edit` |
+| `delete` | Delete a configured device | `mihome-set delete` |
+| `query` | Query real-time device status (single or all) | `mihome-set query` |
+| `types` | View supported device types and features | `mihome-set types` |
+| `password` | Change WebUI login password (leave empty for random) | `mihome-set password` |
+| `api_key` | Change API key (leave empty for random 32-char key) | `mihome-set api_key` |
+| `webui` | Enable/disable WebUI | `mihome-set webui on` or `mihome-set webui off` |
+| `help` | Display help information | `mihome-set help` |
 
-### Thanks
+Run `mihome-set` without any arguments to enter interactive mode. Type `exit` to quit.
 
-<details>
-<summary><strong>Supporter list</strong></summary>
+***
 
-- 浩龙的电子嵌入式之路
+## 🔗 Related Links
 
-- Tsuki
-
-- H_xiaoming
-
-- 0蓝蓝0
-
-- fairybl
-
-- Will
-
-- 自.知
-
-- 观棋不语٩ ི۶
-
-- 爱发电用户_a57a4
-
-- 爱发电用户_2c769
-
-- 霜序
-
-- 远方（闲鱼用户名：小远技术店铺）
-
-- 爱发电用户_399fc
-
-- 斐斐の
-
-- 爱发电用户_09451
-
-- 超高校级的錆鱼
-
-- 爱发电用户_08cff
-
-- guoke
-
-- mgt
-
-- 姜沢掵
-
-- ui_beam
-
-- 爱发电用户_c0dd7
-
-- 爱发电用户_dnjK
-
-- 忍者胖猪
-
-- 永遠の願い
-
-- 爱发电用户_GBrF
-
-- 爱发电用户_fd65c
-
-- 爱发电用户_vhNa
-
-- 爱发电用户_Xu6S
-
-- moss
-
-- woshididi
-
-- 爱发电用户_a0fd1
-
-- 爱发电用户_f6bH
-
-- 码农
-
-- 爱发电用户_6639f
-
-- jeron
-
-- 爱发电用户_CN7y
-
-- 爱发电用户_Up6w
-
-- 爱发电用户_e3202
-
-- 一语念白
-
-- 云边
-
-- 爱发电用户_5a711
-
-- 爱发电用户_9a706
-
-- T0m9ir1SUKI
-
-- 爱发电用户_56d52
-
-- 爱发电用户_3N6F
-
-- DUSK
-
-- 飘零
-
-- .
-
-- 饭太稀
-
-- 葱
-
-- MaxZ
-
-- 爱发电用户_c5f33
-
-- 爱发电用户_09386
-
-- 爱发电用户_JT6c
-
-- 爱发电用户_d3d9c
-
-- 爱发电用户_97b41
-
-- 偶然
-
-- 爱发电用户_dba45
-
-- 爱发电用户_d4f8b
-
-- 故人。
-
-- ......
-
-</details>
-
-### Sponsors
-
-**File hosting**
-
-- **[Huang1111 public-interest program](https://pan.huang1111.cn/s/mxkx3T1)** — login-free downloads
-
-**Cloud**
-
-- **[林枫云](https://www.dkdun.cn)** — project server sponsorship
-
-![林枫云](https://docs.one-kvm.cn/img/36076FEFF0898A80EBD5756D28F4076C.png)
-
-林枫云 offers premium network routes, high-frequency game servers, and high-bandwidth servers in China and abroad.
-
-- **[Beta Network](https://my.beita.cc/?ref=github_onekvm)** — project server sponsorship
-
-![BTBT](https://github.com/user-attachments/assets/c442d5f5-d72f-4a07-b9f4-400a6a0c3f1e)
-
-Remote computers, consumer GPU servers, and dedicated physical machines with fully automated online delivery.
+- **Official One-KVM**: <https://github.com/mofeng-git/One-KVM>
+- **One-KVM Documentation**: <https://docs.one-kvm.cn/>
