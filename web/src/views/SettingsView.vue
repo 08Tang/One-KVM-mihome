@@ -21,6 +21,9 @@ import {
   updateApi,
   usbApi,
   vncConfigApi,
+  getMiHomeConfig,
+  updateMiHomeConfig,
+  checkMiHomeServer,
   type EncoderBackendInfo,
   type AuthConfig,
   type RustDeskConfigResponse,
@@ -114,6 +117,7 @@ import {
   Loader2,
   AlertTriangle,
   Bot,
+  Home,
 } from 'lucide-vue-next'
 
 const { t, te } = useI18n()
@@ -141,6 +145,7 @@ const SETTINGS_SECTION_IDS = [
   'msd',
   'atx',
   'environment',
+  'ext-mihome',
   'ext-ttyd',
   'third-party-access',
   'ext-remote-access',
@@ -171,6 +176,7 @@ const navGroups = computed(() => [
   {
     title: t('settings.extensions'),
     items: [
+      { id: 'ext-mihome', label: t('mihome.settingsTitle'), icon: Home },
       { id: 'ext-ttyd', label: t('extensions.ttyd.title'), icon: Terminal },
       { id: 'third-party-access', label: t('extensions.thirdPartyAccess.title'), icon: ScreenShare },
       { id: 'ext-remote-access', label: t('extensions.remoteAccess.title'), icon: ExternalLink },
@@ -204,6 +210,7 @@ const sectionMeta = computed(() => {
 function sectionSubtitleKey(id: string): string {
   switch (id) {
     case 'ext-ttyd': return 'extTtydSubtitle'
+    case 'ext-mihome': return 'mihome.settingsDesc'
     case 'third-party-access': return 'thirdPartyAccessSubtitle'
     case 'ext-remote-access': return 'extRemoteAccessSubtitle'
     default: return `${id}Subtitle`
@@ -318,6 +325,14 @@ const authConfigLoading = ref(false)
 
 const extensions = ref<ExtensionsStatus | null>(null)
 const extensionsLoading = ref(false)
+
+const mihomeConfig = ref({
+  enabled: false,
+  apiUrl: 'http://localhost:7123',
+  apiKey: ''
+})
+const mihomeSaving = ref(false)
+const mihomeSaved = ref(false)
 const extensionLogs = ref<Record<string, string[]>>({
   ttyd: [],
   gostc: [],
@@ -1689,6 +1704,58 @@ async function saveExtensionConfig(id: ExtensionConfigId) {
   }
 }
 
+async function saveMihomeConfig() {
+  mihomeSaving.value = true
+  try {
+    // If enabling, validate the server first
+    if (mihomeConfig.value.enabled) {
+      const apiUrl = mihomeConfig.value.apiUrl.trim().replace(/\/$/, '')
+      if (!apiUrl) {
+        toast.error(t('mihome.saveFailed'), { description: '请填写 API 地址' })
+        return
+      }
+      if (!mihomeConfig.value.apiKey.trim()) {
+        toast.error(t('mihome.saveFailed'), { description: '请填写 API 密钥' })
+        return
+      }
+      
+      const serverValid = await checkMiHomeServer(apiUrl)
+      if (!serverValid) {
+        toast.error(t('mihome.saveFailed'), { description: '无法连接到米家服务，请检查 API 地址是否正确' })
+        return
+      }
+    }
+    
+    await updateMiHomeConfig({
+      enabled: mihomeConfig.value.enabled,
+      api_url: mihomeConfig.value.apiUrl,
+      api_key: mihomeConfig.value.apiKey,
+    })
+    mihomeSaved.value = true
+    setTimeout(() => (mihomeSaved.value = false), 2000)
+    
+    // Refresh MiHome state in composable so ActionBar updates
+    if (mihomeConfig.value.enabled) {
+      // Try to import and refresh
+      import('@/composables/useMiHome').then(({ useMiHome }) => {
+        const { refreshDevices, loadConfig } = useMiHome()
+        loadConfig().then(() => {
+          refreshDevices().catch(() => {})
+        }).catch(() => {})
+      })
+    } else {
+      import('@/composables/useMiHome').then(({ useMiHome }) => {
+        const { reset } = useMiHome()
+        reset()
+      })
+    }
+  } catch (error: any) {
+    toast.error(t('mihome.saveFailed'), { description: error.message })
+  } finally {
+    mihomeSaving.value = false
+  }
+}
+
 function isExtRunning(status: ExtensionStatus | undefined): boolean {
   return status?.state === 'running'
 }
@@ -2634,6 +2701,19 @@ onMounted(async () => {
   await systemStore.fetchSystemInfo()
   ensureVisibleSection()
   usernameInput.value = authStore.user || ''
+  
+  // 加载米家配置
+  try {
+    const mihomeConfigData = await getMiHomeConfig()
+    mihomeConfig.value = {
+      enabled: mihomeConfigData.enabled,
+      apiUrl: mihomeConfigData.api_url,
+      apiKey: mihomeConfigData.api_key,
+    }
+  } catch (error: any) {
+    console.error('加载米家配置失败:', error)
+  }
+  
   await loadSectionData(activeSection.value)
 
   if (updateRunning.value) {
@@ -4255,6 +4335,52 @@ watch(isWindows, () => {
             </div>
           </div>
 
+          <!-- MiHome Section -->
+          <div v-show="activeSection === 'ext-mihome'" class="space-y-6">
+            <Card>
+              <CardHeader>
+                <div class="flex items-center justify-between">
+                  <div class="space-y-1.5">
+                    <CardTitle>{{ t('mihome.settingsTitle') }}</CardTitle>
+                    <CardDescription>{{ t('mihome.settingsDesc') }}</CardDescription>
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent class="space-y-4">
+                <div class="grid gap-4">
+                  <div class="flex items-center justify-between">
+                    <Label>{{ t('mihome.enabled') }}</Label>
+                    <Switch v-model="mihomeConfig.enabled" />
+                  </div>
+                  <p class="text-xs text-muted-foreground">{{ t('mihome.enabledDesc') }}</p>
+                </div>
+                <Separator />
+                <div class="grid gap-2">
+                  <Label>{{ t('mihome.apiUrl') }}</Label>
+                  <Input
+                    v-model="mihomeConfig.apiUrl"
+                    :placeholder="t('mihome.apiUrlPlaceholder')"
+                  />
+                  <p class="text-xs text-muted-foreground">{{ t('mihome.apiUrlDesc') }}</p>
+                </div>
+                <div class="grid gap-2">
+                  <Label>{{ t('mihome.apiKey') }}</Label>
+                  <Input
+                    v-model="mihomeConfig.apiKey"
+                    type="password"
+                    :placeholder="t('mihome.apiKeyPlaceholder')"
+                  />
+                  <p class="text-xs text-muted-foreground">{{ t('mihome.apiKeyDesc') }}</p>
+                </div>
+              </CardContent>
+            </Card>
+            <div class="flex justify-end">
+              <Button @click="saveMihomeConfig">
+                <Loader2 v-if="mihomeSaving" class="h-4 w-4 mr-2 animate-spin" /><Check v-else-if="mihomeSaved" class="h-4 w-4 mr-2" /><Save v-else class="h-4 w-4 mr-2" />{{ mihomeSaving ? t('actionbar.applying') : mihomeSaved ? t('common.success') : t('common.save') }}
+              </Button>
+            </div>
+          </div>
+
           <!-- Remote Access Section -->
           <div v-show="activeSection === 'ext-remote-access'" class="space-y-6">
             <Card>
@@ -5198,6 +5324,41 @@ watch(isWindows, () => {
 
           <!-- About Section -->
           <div v-show="activeSection === 'about'" class="space-y-6">
+            <Card>
+              <CardHeader>
+                <CardTitle>关于程序</CardTitle>
+                <CardDescription>程序介绍</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div class="space-y-3">
+                  <div class="flex justify-between items-center py-2 border-b gap-2">
+                    <span class="text-sm text-muted-foreground shrink-0">项目名称</span>
+                    <span class="text-sm font-medium truncate">One-KVM-mihome</span>
+                  </div>
+                  <div class="flex justify-between items-center py-2 border-b gap-2">
+                    <span class="text-sm text-muted-foreground shrink-0">项目介绍</span>
+                    <span class="text-sm font-medium truncate max-w-[60%] text-right">One-KVM 米家版，基于原版 One-KVM 二创</span>
+                  </div>
+                  <div class="flex justify-between items-center py-2 border-b gap-2">
+                    <span class="text-sm text-muted-foreground shrink-0">项目地址</span>
+                    <a href="https://github.com/08Tang/One-KVM-mihome" target="_blank" class="text-sm font-medium text-blue-600 hover:text-blue-700 truncate max-w-[60%] text-right">https://github.com/08Tang/One-KVM-mihome</a>
+                  </div>
+                  <div class="flex justify-between items-center py-2 border-b gap-2">
+                    <span class="text-sm text-muted-foreground shrink-0">项目原创</span>
+                    <a href="https://github.com/mofeng-git/One-KVM" target="_blank" class="text-sm font-medium text-blue-600 hover:text-blue-700 truncate max-w-[60%] text-right">https://github.com/mofeng-git/One-KVM</a>
+                  </div>
+                  <div class="flex justify-between items-center py-2 border-b gap-2">
+                    <span class="text-sm text-muted-foreground shrink-0">二创作者</span>
+                    <span class="text-sm font-medium truncate">TKexig</span>
+                  </div>
+                  <div class="flex justify-between items-center py-2 gap-2">
+                    <span class="text-sm text-muted-foreground shrink-0">原创作者</span>
+                    <span class="text-sm font-medium truncate">SilentWind</span>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
             <Card v-if="!isAndroid">
               <CardHeader class="flex flex-row items-start justify-between space-y-0">
                 <div class="space-y-1.5">
@@ -5320,7 +5481,7 @@ watch(isWindows, () => {
               </CardContent>
             </Card>
 
-            <p class="text-xs text-muted-foreground text-center">@2025-2026 SilentWind</p>
+            <p class="text-xs text-muted-foreground text-center">@2025-2026 TKexig and SilentWind</p>
           </div>
 
           <!-- Save Button (sticky) -->

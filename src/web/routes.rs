@@ -191,6 +191,15 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/config/redfish",
             patch(handlers::config::update_redfish_config),
         )
+        // MiHome configuration and proxy
+        .route("/config/mihome", get(handlers::mihome::get_mihome_config))
+        .route(
+            "/config/mihome",
+            patch(handlers::mihome::update_mihome_config),
+        )
+        .route("/mihome/check", get(handlers::mihome::check_mihome_server))
+        .route("/mihome/api", get(handlers::mihome::mihome_api_proxy))
+        .route("/mihome/api", post(handlers::mihome::mihome_control_proxy))
         // System control
         .route("/system/restart", post(handlers::system_restart))
         .route("/update/overview", get(handlers::update_overview))

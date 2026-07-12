@@ -39,6 +39,7 @@ import {
   Terminal,
   MoreHorizontal,
   Bot,
+  Home,
 } from 'lucide-vue-next'
 import PasteModal from '@/components/PasteModal.vue'
 import AtxPopover from '@/components/AtxPopover.vue'
@@ -46,10 +47,15 @@ import VideoConfigPopover, { type VideoMode } from '@/components/VideoConfigPopo
 import HidConfigPopover from '@/components/HidConfigPopover.vue'
 import AudioConfigPopover from '@/components/AudioConfigPopover.vue'
 import MsdDialog from '@/components/MsdDialog.vue'
+import MiHomeDialog from '@/components/MiHomeDialog.vue'
+import { useMiHome } from '@/composables/useMiHome'
 
 const { t, locale } = useI18n()
 const router = useRouter()
 const systemStore = useSystemStore()
+
+// MiHome
+const { mihomeEnabled, loadConfig } = useMiHome()
 
 const overflowMenuOpen = ref(false)
 
@@ -88,6 +94,7 @@ const videoPopoverOpen = ref(false)
 const hidPopoverOpen = ref(false)
 const audioPopoverOpen = ref(false)
 const msdDialogOpen = ref(false)
+const mihomeOpen = ref(false)
 
 const mobileAtxOpen = ref(false)
 const mobilePasteOpen = ref(false)
@@ -125,7 +132,7 @@ let resizeObserver: ResizeObserver | null = null
 
 type CollapsibleItem =
   | 'video' | 'audio' | 'hid'
-  | 'msd' | 'atx' | 'paste'
+  | 'msd' | 'atx' | 'mihome' | 'paste'
   | 'stats' | 'terminal' | 'settings'
 
 interface ItemSpec {
@@ -139,6 +146,7 @@ const ITEM_SPECS: ItemSpec[] = [
   { id: 'hid',       side: 'left' },
   { id: 'msd',       side: 'left' },
   { id: 'atx',       side: 'left' },
+  { id: 'mihome',    side: 'left' },
   { id: 'paste',     side: 'left' },
   { id: 'stats',     side: 'right' },
   { id: 'terminal',  side: 'right' },
@@ -181,6 +189,9 @@ onMounted(() => {
   }
   
   measureButtonWidths()
+  
+  // Load MiHome config to check if feature is enabled
+  loadConfig().catch(() => {})
 })
 
 onUnmounted(() => { 
@@ -199,6 +210,7 @@ const collapsibleItems = computed(() => {
     if (item.id === 'msd' && !showMsd.value) return false
     if (item.id === 'stats' && !showStats.value) return false
     if (item.id === 'terminal' && props.showTerminal === false) return false
+    if (item.id === 'mihome' && !mihomeEnabled.value) return false
     return true
   })
   return items
@@ -310,6 +322,21 @@ const hasRightOverflow = computed(() => {
                 @reset="emit('reset')"
                 @wol="(mac) => emit('wol', mac)"
               />
+            </PopoverContent>
+          </Popover>
+        </div>
+
+        <!-- MiHome - Adaptive -->
+        <div v-if="isVisible('mihome')">
+          <Popover v-model:open="mihomeOpen">
+            <PopoverTrigger as-child>
+              <Button variant="ghost" size="sm" class="h-8 gap-1.5 text-xs">
+                <Home class="h-4 w-4" />
+                <span v-if="visibleSet.get('mihome') === 'label'">{{ t('actionbar.mihome') }}</span>
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent class="w-[min(280px,90vw)] p-0" align="start">
+              <MiHomeDialog :open="mihomeOpen" @close="mihomeOpen = false" />
             </PopoverContent>
           </Popover>
         </div>
@@ -471,6 +498,12 @@ const hasRightOverflow = computed(() => {
               {{ t('actionbar.power') }}
             </DropdownMenuItem>
 
+            <!-- MiHome -->
+            <DropdownMenuItem v-if="mihomeEnabled && !isVisible('mihome')" @click="openFromOverflow(() => mihomeOpen = true)">
+              <Home class="h-4 w-4 mr-2" />
+              {{ t('actionbar.mihome') }}
+            </DropdownMenuItem>
+
             <!-- Paste -->
             <DropdownMenuItem v-if="!isVisible('paste')" @click="openMobilePaste">
               <ClipboardPaste class="h-4 w-4 mr-2" />
@@ -556,6 +589,9 @@ const hasRightOverflow = computed(() => {
       <!-- ATX -->
       <Button data-measure="atx-icon" variant="ghost" size="sm" class="h-8 gap-1.5 text-xs"><Power class="h-4 w-4" /></Button>
       <Button data-measure="atx-label" variant="ghost" size="sm" class="h-8 gap-1.5 text-xs"><Power class="h-4 w-4" />{{ t('actionbar.power') }}</Button>
+      <!-- MiHome -->
+      <Button data-measure="mihome-icon" variant="ghost" size="sm" class="h-8 gap-1.5 text-xs"><Home class="h-4 w-4" /></Button>
+      <Button data-measure="mihome-label" variant="ghost" size="sm" class="h-8 gap-1.5 text-xs"><Home class="h-4 w-4" />{{ t('actionbar.mihome') }}</Button>
       <!-- Paste -->
       <Button data-measure="paste-icon" variant="ghost" size="sm" class="h-8 gap-1.5 text-xs"><ClipboardPaste class="h-4 w-4" /></Button>
       <Button data-measure="paste-label" variant="ghost" size="sm" class="h-8 gap-1.5 text-xs"><ClipboardPaste class="h-4 w-4" />{{ t('actionbar.paste') }}</Button>

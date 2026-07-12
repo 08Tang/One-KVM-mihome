@@ -8,6 +8,7 @@ mod atx;
 mod common;
 mod computer_use;
 mod hid;
+mod mihome;
 mod stream;
 mod web;
 
@@ -15,6 +16,7 @@ pub use atx::*;
 pub use common::*;
 pub use computer_use::*;
 pub use hid::*;
+pub use mihome::*;
 pub use stream::*;
 pub use web::*;
 
@@ -38,6 +40,7 @@ pub struct AppConfig {
     pub vnc: VncConfig,
     pub rtsp: RtspConfig,
     pub redfish: RedfishConfig,
+    pub mihome: MiHomeConfig,
 }
 
 impl AppConfig {

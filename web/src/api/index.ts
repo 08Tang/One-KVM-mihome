@@ -895,3 +895,17 @@ export const usbApi = {
 }
 
 export { ApiError }
+
+// 米家 API
+export {
+  getMiHomeConfig,
+  updateMiHomeConfig,
+  getMiHomeDevices,
+  getMiHomeDeviceStatus,
+  controlMiHomeDevice,
+  checkMiHomeServer,
+  type MiHomeConfig,
+  type MiHomeDevice,
+  type MiHomeDeviceStatus,
+  type MiHomeProperty,
+} from './mihome'
