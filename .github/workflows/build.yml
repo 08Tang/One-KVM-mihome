@@ -83,6 +83,14 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: one-kvm-binaries
+          path: target/binary/*
+          if-no-files-found: error
+          retention-days: 7
+
   windows:
     runs-on: windows-2022
     needs: frontend
@@ -166,6 +174,12 @@ jobs:
           name: one-kvm-windows-exe
           path: release-artifacts/windows
 
+      - name: Download binaries artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: one-kvm-binaries
+          path: release-artifacts/binary
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -175,3 +189,4 @@ jobs:
           files: |
             release-artifacts/deb/*.deb
             release-artifacts/windows/*.exe
+            release-artifacts/binary/*

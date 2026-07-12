@@ -183,3 +183,19 @@ echo "========================================"
 echo "All packages built successfully!"
 echo "========================================"
 ls -la "$OUTPUT_DIR"/*.deb
+
+BINARY_OUT_DIR="$PROJECT_DIR/target/binary"
+mkdir -p "$BINARY_OUT_DIR"
+
+echo ""
+echo "Copying binaries to output directory:"
+for target in "${TARGETS[@]}"; do
+    IFS=':' read -r RUST_TARGET DEB_ARCH <<< "$target"
+    BINARY_PATH="$PROJECT_DIR/target/$RUST_TARGET/release/one-kvm"
+    if [ -f "$BINARY_PATH" ]; then
+        cp "$BINARY_PATH" "$PROJECT_DIR/target/$RUST_TARGET/release/$RUST_TARGET"
+        cp "$BINARY_PATH" "$BINARY_OUT_DIR/$RUST_TARGET"
+        echo "  $RUST_TARGET -> target/$RUST_TARGET/release/$RUST_TARGET"
+        echo "  $RUST_TARGET -> target/binary/$RUST_TARGET"
+    fi
+done
