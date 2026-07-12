@@ -24,7 +24,7 @@
   --border: oklch(91.97% 0.004 286.32);
   --input: oklch(91.97% 0.004 286.32);
   --ring: oklch(70.9% 0.015 286.07);
-  --radius: 0.5rem;
+  --radius: 0.875rem;
   --chart-1: oklch(57.42% 0.169 243.35);
   --chart-2: oklch(76.95% 0.149 183.61);
   --chart-3: oklch(55.75% 0.099 259.21);
@@ -134,4 +134,70 @@ body {
 
 #app {
   min-height: 100vh;
+}
+
+/* Liquid glass effect for cards, dialogs, popovers, panels */
+.bg-card,
+.bg-background,
+.bg-popover,
+[data-slot="card"],
+[data-slot="dialog-content"],
+[data-slot="dropdown-menu-content"],
+[data-radix-popover-content],
+[data-radix-tooltip-content],
+[data-radix-select-content],
+[data-radix-hover-card-content],
+[data-radix-alert-dialog-content] {
+  background-color: rgba(255, 255, 255, 0.72) !important;
+  backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.3) !important;
+  box-shadow:
+    0 8px 32px rgba(0, 0, 0, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.5);
+}
+
+.dark .bg-card,
+.dark .bg-background,
+.dark .bg-popover,
+.dark [data-slot="card"],
+.dark [data-slot="dialog-content"],
+.dark [data-slot="dropdown-menu-content"],
+.dark [data-radix-popover-content],
+.dark [data-radix-tooltip-content],
+.dark [data-radix-select-content],
+.dark [data-radix-hover-card-content],
+.dark [data-radix-alert-dialog-content] {
+  background-color: rgba(30, 30, 40, 0.72) !important;
+  backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  box-shadow:
+    0 8px 32px rgba(0, 0, 0, 0.32),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+/* Enhanced dialog/dialog overlay */
+[data-slot="dialog-overlay"],
+[data-radix-dialog-overlay] {
+  background-color: rgba(0, 0, 0, 0.4) !important;
+  backdrop-filter: blur(8px);
+}
+
+/* Smooth transitions for all interactive elements */
+button,
+[role="button"],
+input,
+select,
+textarea {
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Enhanced focus states */
+button:focus-visible,
+[role="button"]:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  box-shadow:
+    0 0 0 3px rgba(59, 130, 246, 0.15),
+    0 0 0 1px rgba(59, 130, 246, 0.4);
 }

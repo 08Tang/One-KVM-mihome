@@ -2770,7 +2770,7 @@ watch(isWindows, () => {
               <span class="sr-only">{{ t('common.menu') }}</span>
             </Button>
           </SheetTrigger>
-          <SheetContent side="left" class="w-72 p-0 overflow-y-auto">
+          <SheetContent side="left" class="w-72 p-0 overflow-y-auto my-1.5 ml-1.5 rounded-xl">
             <div class="min-h-full p-4 sm:p-6">
               <h2 class="text-lg font-semibold mb-4">{{ t('settings.title') }}</h2>
               <nav class="space-y-6">
@@ -2804,7 +2804,7 @@ watch(isWindows, () => {
       </div>
 
       <!-- Desktop Sidebar -->
-      <aside class="hidden lg:block w-64 shrink-0 border-r bg-muted/30 overflow-hidden">
+      <aside class="hidden lg:block w-64 shrink-0 my-4 ml-4 rounded-2xl bg-muted/30 overflow-hidden">
         <div class="h-full p-6 space-y-6 overflow-y-auto">
           <div class="space-y-1">
             <h1 class="text-xl font-semibold tracking-tight">{{ t('settings.title') }}</h1>

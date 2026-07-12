@@ -405,7 +405,7 @@ onUnmounted(() => {
   <Sheet :open="props.open" @update:open="emit('update:open', $event)">
     <SheetContent
       side="right"
-      class="w-[90vw] max-w-[440px] p-0 border-l border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950"
+      class="w-[90vw] max-w-[440px] p-0 border-l border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 my-2 rounded-tl-2xl rounded-bl-2xl"
     >
       <!-- Header -->
       <SheetHeader class="px-6 py-3 border-b border-slate-200 dark:border-slate-800">
