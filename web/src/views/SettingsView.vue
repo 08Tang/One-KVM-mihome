@@ -269,15 +269,12 @@ async function loadSectionData(section: SettingsSectionId) {
     case 'video':
       await Promise.all([
         loadConfig(),
-        loadDevices(),
+        loadDeviceConfig(),
         loadBackends(),
       ])
       return
     case 'hid':
-      await Promise.all([
-        loadConfig(),
-        loadDevices(),
-      ])
+      await Promise.all([loadConfig(), loadHidDeviceOptions()])
       return
     case 'atx':
       await Promise.all([
@@ -689,6 +686,7 @@ const config = ref({
 
 const otgNetworkInterfaces = ref<NetworkInterfaceInfo[]>([])
 const otgNetworkInterfacesLoaded = ref(false)
+const otgNetworkInterfacesError = ref('')
 const otgNetworkStatus = ref<OtgNetworkStatus | null>(null)
 
 function syncOtgNetworkInterface() {
@@ -1569,18 +1567,28 @@ async function loadConfig() {
   }
 }
 
-async function loadDevices() {
+async function loadDeviceConfig() {
   try {
-    const [deviceConfig, networkInterfaces] = await Promise.all([
-      configApi.listDevices(),
-      otgNetworkApi.interfaces().catch(() => []),
-    ])
-    devices.value = deviceConfig
-    otgNetworkInterfaces.value = networkInterfaces
+    devices.value = await configApi.listDevices()
+  } catch {
+  }
+}
+
+async function loadOtgNetworkInterfaces() {
+  otgNetworkInterfacesError.value = ''
+  try {
+    otgNetworkInterfaces.value = await otgNetworkApi.interfaces()
     otgNetworkInterfacesLoaded.value = true
     syncOtgNetworkInterface()
   } catch {
+    otgNetworkInterfaces.value = []
+    otgNetworkInterfacesLoaded.value = false
+    otgNetworkInterfacesError.value = t('settings.otgNetworkInterfacesLoadFailed')
   }
+}
+
+async function loadHidDeviceOptions() {
+  await Promise.all([loadDeviceConfig(), loadOtgNetworkInterfaces()])
 }
 
 async function loadBackends() {
@@ -2902,7 +2910,7 @@ watch(isWindows, () => {
                   <CardTitle>{{ t('settings.videoSettings') }}</CardTitle>
                   <CardDescription>{{ t('settings.videoSettingsDesc') }}</CardDescription>
                 </div>
-                <Button variant="ghost" size="icon-sm" :aria-label="t('common.refresh')" @click="loadDevices">
+                <Button variant="ghost" size="icon-sm" :aria-label="t('common.refresh')" @click="loadDeviceConfig">
                   <RefreshCw class="size-4" />
                 </Button>
               </CardHeader>
@@ -3041,7 +3049,7 @@ watch(isWindows, () => {
                   <CardTitle>{{ t('settings.hidSettings') }}</CardTitle>
                   <CardDescription>{{ t('settings.hidSettingsDesc') }}</CardDescription>
                 </div>
-                <Button variant="ghost" size="icon-sm" :aria-label="t('common.refresh')" @click="loadDevices">
+                <Button variant="ghost" size="icon-sm" :aria-label="t('common.refresh')" @click="loadHidDeviceOptions">
                   <RefreshCw class="size-4" />
                 </Button>
               </CardHeader>
@@ -3325,8 +3333,22 @@ watch(isWindows, () => {
                             </div>
                             <div class="space-y-2">
                               <Label for="otg-network-interface">{{ t('settings.otgNetworkInterface') }}</Label>
-                              <NativeSelect id="otg-network-interface" v-model="config.otg_network_interface" class="w-full" :disabled="otgNetworkInterfaces.length === 0">
-                                <NativeSelectOption v-if="otgNetworkInterfaces.length === 0" value="">{{ t('settings.otgNetworkNone') }}</NativeSelectOption>
+                              <NativeSelect
+                                id="otg-network-interface"
+                                v-model="config.otg_network_interface"
+                                class="w-full"
+                                :disabled="otgNetworkInterfaces.length === 0"
+                                :aria-invalid="Boolean(otgNetworkInterfacesError)"
+                              >
+                                <NativeSelectOption
+                                  v-if="otgNetworkInterfacesError"
+                                  :value="config.otg_network_interface"
+                                >
+                                  {{ otgNetworkInterfacesError }}
+                                </NativeSelectOption>
+                                <NativeSelectOption v-else-if="otgNetworkInterfaces.length === 0" value="">
+                                  {{ t('settings.otgNetworkNone') }}
+                                </NativeSelectOption>
                                 <NativeSelectOption
                                   v-for="item in otgNetworkInterfaces"
                                   :key="item.name"

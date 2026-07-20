@@ -653,6 +653,7 @@ export default {
     otgNetworkDriver: 'Host Driver Mode',
     otgNetworkInterface: 'Bridge Interface',
     otgNetworkNone: 'None',
+    otgNetworkInterfacesLoadFailed: 'Failed to load bridge interfaces',
     otgDescriptor: 'USB Device Descriptor',
     vendorId: 'Vendor ID (VID)',
     productId: 'Product ID (PID)',

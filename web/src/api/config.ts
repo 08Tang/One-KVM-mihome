@@ -115,7 +115,7 @@ export const otgNetworkApi = {
 
   status: () => request<OtgNetworkStatus>('/otg/network/status'),
 
-  interfaces: () => request<NetworkInterfaceInfo[]>('/devices/network'),
+  interfaces: () => request<NetworkInterfaceInfo[]>('/devices/network', {}, { toastOnError: false }),
 }
 
 export const otgConfigApi = {

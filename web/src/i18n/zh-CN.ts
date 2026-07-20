@@ -652,6 +652,7 @@ export default {
     otgNetworkDriver: '目标机驱动模式',
     otgNetworkInterface: '桥接网卡',
     otgNetworkNone: '无',
+    otgNetworkInterfacesLoadFailed: '无法获取桥接网卡列表',
     otgDescriptor: 'USB 设备描述符',
     vendorId: '厂商 ID (VID)',
     productId: '产品 ID (PID)',
