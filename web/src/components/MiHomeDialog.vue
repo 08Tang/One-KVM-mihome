@@ -474,7 +474,7 @@ onUnmounted(() => {
           :model-value="String(prop.value)"
           @update:model-value="handleSelectChange(prop.key, $event)"
         >
-          <SelectTrigger class="w-[120px] h-7 text-xs">
+          <SelectTrigger class="w-[122px] h-7 text-xs">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
