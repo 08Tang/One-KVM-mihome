@@ -10,7 +10,13 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from '@/components/ui/popover'
-import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { Volume2, RefreshCw, Loader2 } from 'lucide-vue-next'
 import { audioApi, configApi } from '@/api'
 import { useConfigStore } from '@/stores/config'
@@ -225,22 +231,25 @@ watch(() => props.open, (isOpen) => {
             <!-- Device Selection -->
             <div class="space-y-2">
               <Label class="text-xs text-muted-foreground">{{ t('actionbar.audioDevice') }}</Label>
-              <NativeSelect
+              <Select
                 :model-value="selectedDevice"
                 @update:model-value="(v) => selectedDevice = v as string"
                 :disabled="loadingDevices || devices.length === 0"
-                size="sm" class="w-full text-xs"
               >
-                  <NativeSelectOption value="">{{ t('actionbar.selectAudioDevice') }}</NativeSelectOption>
-                  <NativeSelectOption
+                <SelectTrigger size="sm" class="w-full text-xs">
+                  <SelectValue :placeholder="t('actionbar.selectAudioDevice')" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem
                     v-for="device in devices"
                     :key="device.name"
                     :value="device.name"
                     class="text-xs"
                   >
                     {{ device.description || device.name }}
-                  </NativeSelectOption>
-              </NativeSelect>
+                  </SelectItem>
+                </SelectContent>
+              </Select>
             </div>
 
             <!-- Audio Quality -->

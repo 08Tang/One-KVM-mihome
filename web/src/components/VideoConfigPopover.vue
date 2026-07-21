@@ -5,7 +5,7 @@ import { toast } from 'vue-sonner'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Separator } from '@/components/ui/separator'
-import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select'
+
 import {
   Popover,
   PopoverContent,
@@ -744,22 +744,25 @@ watch(
           <!-- Device Selection -->
           <div class="space-y-2">
             <Label class="text-xs text-muted-foreground">{{ t('actionbar.videoDevice') }}</Label>
-            <NativeSelect
+            <Select
               :model-value="selectedDevice"
               @update:model-value="handleDeviceChange"
               :disabled="loadingDevices || devices.length === 0"
-              size="sm" class="w-full text-xs"
             >
-                <NativeSelectOption value="">{{ loadingDevices ? t('common.loading') : t('actionbar.selectDevice') }}</NativeSelectOption>
-                <NativeSelectOption
+              <SelectTrigger size="sm" class="w-full text-xs">
+                <SelectValue :placeholder="loadingDevices ? t('common.loading') : t('actionbar.selectDevice')" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem
                   v-for="device in devices"
                   :key="device.path"
                   :value="device.path"
                   class="text-xs"
                 >
                   {{ formatVideoDeviceLabel(device) }}
-                </NativeSelectOption>
-            </NativeSelect>
+                </SelectItem>
+              </SelectContent>
+            </Select>
           </div>
 
           <!-- Format Selection -->
@@ -825,43 +828,49 @@ watch(
           <!-- Resolution Selection -->
           <div class="space-y-2">
             <Label class="text-xs text-muted-foreground">{{ t('actionbar.videoResolution') }}</Label>
-            <NativeSelect
+            <Select
               :model-value="selectedResolution"
               @update:model-value="handleResolutionChange"
               :disabled="!selectedFormat || availableResolutions.length === 0"
-              size="sm" class="w-full text-xs"
             >
-                <NativeSelectOption value="">{{ t('actionbar.selectResolution') }}</NativeSelectOption>
-                <NativeSelectOption
+              <SelectTrigger size="sm" class="w-full text-xs">
+                <SelectValue :placeholder="t('actionbar.selectResolution')" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem
                   v-for="res in availableResolutions"
                   :key="`${res.width}x${res.height}`"
                   :value="`${res.width}x${res.height}`"
                   class="text-xs"
                 >
                   {{ res.width }} x {{ res.height }}
-                </NativeSelectOption>
-            </NativeSelect>
+                </SelectItem>
+              </SelectContent>
+            </Select>
           </div>
 
           <!-- FPS Selection -->
           <div class="space-y-2">
             <Label class="text-xs text-muted-foreground">{{ t('actionbar.videoFps') }}</Label>
-            <NativeSelect
+            <Select
               :model-value="String(selectedFps)"
               @update:model-value="handleFpsChange"
               :disabled="!selectedResolution || availableFps.length === 0"
-              size="sm" class="w-full text-xs"
             >
-                <NativeSelectOption value="">{{ t('actionbar.selectFps') }}</NativeSelectOption>
-                <NativeSelectOption
+              <SelectTrigger size="sm" class="w-full text-xs">
+                <SelectValue :placeholder="t('actionbar.selectFps')" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem
                   v-for="fps in availableFps"
                   :key="fps"
                   :value="String(fps)"
                   class="text-xs"
                 >
                   {{ formatFpsLabel(fps) }}
-                </NativeSelectOption>
-            </NativeSelect>
+                </SelectItem>
+              </SelectContent>
+            </Select>
           </div>
 
           <!-- Apply Button -->

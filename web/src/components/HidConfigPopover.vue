@@ -19,7 +19,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select'
 import { MousePointer, Move, Loader2, RefreshCw } from 'lucide-vue-next'
 import HelpTooltip from '@/components/HelpTooltip.vue'
 import { configApi } from '@/api'
@@ -343,22 +342,25 @@ watch(() => props.open, (isOpen) => {
           <!-- Device Path (OTG or CH9329) -->
           <div v-if="hidBackend !== HidBackend.None" class="space-y-2">
             <Label class="text-xs text-muted-foreground">{{ t('actionbar.devicePath') }}</Label>
-            <NativeSelect
+            <Select
               :model-value="devicePath"
               @update:model-value="handleDevicePathChange"
               :disabled="availableDevicePaths.length === 0"
-              size="sm" class="w-full text-xs"
             >
-                <NativeSelectOption value="">{{ t('actionbar.selectDevice') }}</NativeSelectOption>
-                <NativeSelectOption
+              <SelectTrigger size="sm" class="w-full text-xs">
+                <SelectValue :placeholder="t('actionbar.selectDevice')" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem
                   v-for="device in availableDevicePaths"
                   :key="device.path"
                   :value="device.path"
                   class="text-xs"
                 >
                   {{ device.name }}
-                </NativeSelectOption>
-            </NativeSelect>
+                </SelectItem>
+              </SelectContent>
+            </Select>
           </div>
 
           <!-- Baudrate (CH9329 only) -->

@@ -73,7 +73,6 @@ import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { Separator } from '@/components/ui/separator'
 import { Badge } from '@/components/ui/badge'
-import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { ButtonGroup } from '@/components/ui/button-group'
@@ -2989,38 +2988,56 @@ watch(isWindows, () => {
               <CardContent class="space-y-4">
                 <div class="space-y-2">
                   <Label for="video-device">{{ t('settings.videoDevice') }}</Label>
-                  <NativeSelect id="video-device" v-model="config.video_device" class="w-full">
-                    <NativeSelectOption value="">{{ t('settings.selectDevice') }}</NativeSelectOption>
-                    <NativeSelectOption v-for="dev in devices.video" :key="dev.path" :value="dev.path">{{ formatVideoDeviceLabel(dev) }}</NativeSelectOption>
-                  </NativeSelect>
+                  <Select v-model="config.video_device">
+                    <SelectTrigger id="video-device" class="w-full">
+                      <SelectValue :placeholder="t('settings.selectDevice')" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem v-for="dev in devices.video" :key="dev.path" :value="dev.path">{{ formatVideoDeviceLabel(dev) }}</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div class="space-y-2">
                   <Label for="video-format">{{ t('settings.videoFormat') }}</Label>
-                  <NativeSelect id="video-format" v-model="config.video_format" class="w-full" :disabled="!config.video_device">
-                    <NativeSelectOption value="">{{ t('settings.selectFormat') }}</NativeSelectOption>
-                    <NativeSelectOption
-                      v-for="fmt in availableFormatOptions"
-                      :key="fmt.format"
-                      :value="fmt.format"
-                      :disabled="fmt.disabled"
-                    >
-                      {{ fmt.format }} - {{ fmt.description }}{{ fmt.disabled ? t('common.notSupportedYet') : '' }}
-                    </NativeSelectOption>
-                  </NativeSelect>
+                  <Select v-model="config.video_format" :disabled="!config.video_device">
+                    <SelectTrigger id="video-format" class="w-full">
+                      <SelectValue :placeholder="t('settings.selectFormat')" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem
+                        v-for="fmt in availableFormatOptions"
+                        :key="fmt.format"
+                        :value="fmt.format"
+                        :disabled="fmt.disabled"
+                      >
+                        {{ fmt.format }} - {{ fmt.description }}{{ fmt.disabled ? t('common.notSupportedYet') : '' }}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div class="grid gap-4 sm:grid-cols-2">
                   <div class="space-y-2">
                     <Label for="video-resolution">{{ t('settings.resolution') }}</Label>
-                    <NativeSelect id="video-resolution" :model-value="`${config.video_width}x${config.video_height}`" class="w-full" :disabled="!config.video_format" @update:model-value="value => { const parts = String(value).split('x').map(Number); if (parts[0] && parts[1]) { config.video_width = parts[0]; config.video_height = parts[1]; } }">
-                      <NativeSelectOption v-for="res in availableResolutions" :key="`${res.width}x${res.height}`" :value="`${res.width}x${res.height}`">{{ res.width }}x{{ res.height }}</NativeSelectOption>
-                    </NativeSelect>
+                    <Select :model-value="`${config.video_width}x${config.video_height}`" :disabled="!config.video_format" @update:model-value="value => { const parts = String(value).split('x').map(Number); if (parts[0] && parts[1]) { config.video_width = parts[0]; config.video_height = parts[1]; } }">
+                      <SelectTrigger id="video-resolution" class="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem v-for="res in availableResolutions" :key="`${res.width}x${res.height}`" :value="`${res.width}x${res.height}`">{{ res.width }}x{{ res.height }}</SelectItem>
+                      </SelectContent>
+                    </Select>
                   </div>
                   <div class="space-y-2">
                     <Label for="video-fps">{{ t('settings.frameRate') }}</Label>
-                    <NativeSelect id="video-fps" :model-value="config.video_fps" class="w-full" :disabled="!config.video_format" @update:model-value="value => config.video_fps = Number(value)">
-                      <NativeSelectOption v-for="fps in availableFps" :key="fps" :value="fps">{{ formatFpsLabel(fps) }}</NativeSelectOption>
-                      <NativeSelectOption v-if="!availableFps.includes(config.video_fps)" :value="config.video_fps">{{ formatFpsLabel(config.video_fps) }}</NativeSelectOption>
-                    </NativeSelect>
+                    <Select :model-value="config.video_fps" :disabled="!config.video_format" @update:model-value="value => config.video_fps = Number(value)">
+                      <SelectTrigger id="video-fps" class="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem v-for="fps in availableFps" :key="fps" :value="fps">{{ formatFpsLabel(fps) }}</SelectItem>
+                        <SelectItem v-if="!availableFps.includes(config.video_fps)" :value="config.video_fps">{{ formatFpsLabel(config.video_fps) }}</SelectItem>
+                      </SelectContent>
+                    </Select>
                   </div>
                 </div>
               </CardContent>
@@ -3139,10 +3156,14 @@ watch(isWindows, () => {
                 </div>
                 <div v-if="config.hid_backend === 'ch9329'" class="space-y-2">
                   <Label for="serial-device">{{ t('settings.serialDevice') }}</Label>
-                  <NativeSelect id="serial-device" v-model="config.hid_serial_device" class="w-full">
-                    <NativeSelectOption value="">{{ t('settings.selectDevice') }}</NativeSelectOption>
-                    <NativeSelectOption v-for="dev in devices.serial" :key="dev.path" :value="dev.path">{{ dev.name }} ({{ dev.path }})</NativeSelectOption>
-                  </NativeSelect>
+                  <Select v-model="config.hid_serial_device">
+                    <SelectTrigger id="serial-device" class="w-full">
+                      <SelectValue :placeholder="t('settings.selectDevice')" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem v-for="dev in devices.serial" :key="dev.path" :value="dev.path">{{ dev.name }} ({{ dev.path }})</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div v-if="config.hid_backend === 'ch9329'" class="space-y-2">
                   <Label for="serial-baudrate">{{ t('settings.baudRate') }}</Label>
@@ -3155,10 +3176,14 @@ watch(isWindows, () => {
                 </div>
                 <div v-if="config.hid_backend === 'otg'" class="space-y-2">
                   <Label for="otg-udc">{{ t('settings.otgUdc') }}</Label>
-                  <NativeSelect id="otg-udc" v-model="config.hid_otg_udc" class="w-full">
-                    <NativeSelectOption value="">{{ t('settings.autoRecommended') }}</NativeSelectOption>
-                    <NativeSelectOption v-for="udc in devices.udc" :key="udc.name" :value="udc.name">{{ udc.name }}</NativeSelectOption>
-                  </NativeSelect>
+                  <Select v-model="config.hid_otg_udc">
+                    <SelectTrigger id="otg-udc" class="w-full">
+                      <SelectValue :placeholder="t('settings.autoRecommended')" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem v-for="udc in devices.udc" :key="udc.name" :value="udc.name">{{ udc.name }}</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
 
                 <template v-if="config.hid_backend === 'ch9329'">
@@ -3405,16 +3430,20 @@ watch(isWindows, () => {
                             </div>
                             <div class="space-y-2">
                               <Label for="otg-network-interface">{{ t('settings.otgNetworkInterface') }}</Label>
-                              <NativeSelect id="otg-network-interface" v-model="config.otg_network_interface" class="w-full" :disabled="otgNetworkInterfaces.length === 0">
-                                <NativeSelectOption v-if="otgNetworkInterfaces.length === 0" value="">{{ t('settings.otgNetworkNone') }}</NativeSelectOption>
-                                <NativeSelectOption
-                                  v-for="item in otgNetworkInterfaces"
-                                  :key="item.name"
-                                  :value="item.name"
-                                >
-                                  {{ item.name }} · {{ item.interface_type }}
-                                </NativeSelectOption>
-                              </NativeSelect>
+                              <Select v-model="config.otg_network_interface" :disabled="otgNetworkInterfaces.length === 0">
+                                <SelectTrigger id="otg-network-interface" class="w-full">
+                                  <SelectValue :placeholder="otgNetworkInterfaces.length === 0 ? t('settings.otgNetworkNone') : ''" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem
+                                    v-for="item in otgNetworkInterfaces"
+                                    :key="item.name"
+                                    :value="item.name"
+                                  >
+                                    {{ item.name }} · {{ item.interface_type }}
+                                  </SelectItem>
+                                </SelectContent>
+                              </Select>
                             </div>
                           </div>
                         </template>
@@ -4100,17 +4129,21 @@ watch(isWindows, () => {
                 <div v-if="['usbrelay', 'serial'].includes(atxConfig.driver)" class="grid gap-4 sm:grid-cols-2">
                   <div v-if="['usbrelay', 'serial'].includes(atxConfig.driver)" class="space-y-2">
                     <Label for="atx-device">{{ t('settings.atxDevice') }}</Label>
-                    <NativeSelect id="atx-device" v-model="atxConfig.device" class="w-full">
-                      <NativeSelectOption value="">{{ t('settings.selectDevice') }}</NativeSelectOption>
-                      <NativeSelectOption
-                        v-for="dev in getAtxDevicesForDriver(atxConfig.driver)"
-                        :key="dev"
-                        :value="dev"
-                        :disabled="atxConfig.driver === 'serial' && isAtxSerialDeviceReserved(dev)"
-                      >
-                        {{ formatAtxDeviceLabel(atxConfig.driver, dev) }}
-                      </NativeSelectOption>
-                    </NativeSelect>
+                    <Select v-model="atxConfig.device">
+                      <SelectTrigger id="atx-device" class="w-full">
+                        <SelectValue :placeholder="t('settings.selectDevice')" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem
+                          v-for="dev in getAtxDevicesForDriver(atxConfig.driver)"
+                          :key="dev"
+                          :value="dev"
+                          :disabled="atxConfig.driver === 'serial' && isAtxSerialDeviceReserved(dev)"
+                        >
+                          {{ formatAtxDeviceLabel(atxConfig.driver, dev) }}
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
                   </div>
                   <div v-if="atxConfig.driver === 'serial'" class="space-y-2">
                     <Label for="atx-baudrate">{{ t('settings.baudRate') }}</Label>
@@ -4131,10 +4164,14 @@ watch(isWindows, () => {
                       <div class="grid gap-3 sm:grid-cols-3">
                         <div class="space-y-2">
                           <Label for="power-device">{{ t('settings.atxGpioChip') }}</Label>
-                          <NativeSelect id="power-device" v-model="atxConfig.power.device" class="w-full">
-                            <NativeSelectOption value="">{{ t('settings.atxDriverNone') }}</NativeSelectOption>
-                            <NativeSelectOption v-for="dev in atxDevices.gpio_chips" :key="dev" :value="dev">{{ dev }}</NativeSelectOption>
-                          </NativeSelect>
+                          <Select v-model="atxConfig.power.device">
+                            <SelectTrigger id="power-device" class="w-full">
+                              <SelectValue :placeholder="t('settings.atxDriverNone')" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem v-for="dev in atxDevices.gpio_chips" :key="dev" :value="dev">{{ dev }}</SelectItem>
+                            </SelectContent>
+                          </Select>
                         </div>
                         <div class="space-y-2">
                           <Label for="power-pin">{{ t('settings.atxPin') }}</Label>
@@ -4155,10 +4192,14 @@ watch(isWindows, () => {
                       <div class="grid gap-3 sm:grid-cols-3">
                         <div class="space-y-2">
                           <Label for="reset-device">{{ t('settings.atxGpioChip') }}</Label>
-                          <NativeSelect id="reset-device" v-model="atxConfig.reset.device" class="w-full">
-                            <NativeSelectOption value="">{{ t('settings.atxDriverNone') }}</NativeSelectOption>
-                            <NativeSelectOption v-for="dev in atxDevices.gpio_chips" :key="dev" :value="dev">{{ dev }}</NativeSelectOption>
-                          </NativeSelect>
+                          <Select v-model="atxConfig.reset.device">
+                            <SelectTrigger id="reset-device" class="w-full">
+                              <SelectValue :placeholder="t('settings.atxDriverNone')" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem v-for="dev in atxDevices.gpio_chips" :key="dev" :value="dev">{{ dev }}</SelectItem>
+                            </SelectContent>
+                          </Select>
                         </div>
                         <div class="space-y-2">
                           <Label for="reset-pin">{{ t('settings.atxPin') }}</Label>
@@ -4179,10 +4220,14 @@ watch(isWindows, () => {
                       <div class="grid gap-3 sm:grid-cols-3">
                         <div class="space-y-2">
                           <Label for="led-device">{{ t('settings.atxGpioChip') }}</Label>
-                          <NativeSelect id="led-device" v-model="atxConfig.led.device" class="w-full">
-                            <NativeSelectOption value="">{{ t('settings.atxDriverNone') }}</NativeSelectOption>
-                            <NativeSelectOption v-for="dev in atxDevices.gpio_chips" :key="dev" :value="dev">{{ dev }}</NativeSelectOption>
-                          </NativeSelect>
+                          <Select v-model="atxConfig.led.device">
+                            <SelectTrigger id="led-device" class="w-full">
+                              <SelectValue :placeholder="t('settings.atxDriverNone')" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem v-for="dev in atxDevices.gpio_chips" :key="dev" :value="dev">{{ dev }}</SelectItem>
+                            </SelectContent>
+                          </Select>
                         </div>
                         <div class="space-y-2">
                           <Label for="led-pin">{{ t('settings.atxPin') }}</Label>
@@ -4203,10 +4248,14 @@ watch(isWindows, () => {
                       <div class="grid gap-3 sm:grid-cols-3">
                         <div class="space-y-2">
                           <Label for="hdd-device">{{ t('settings.atxGpioChip') }}</Label>
-                          <NativeSelect id="hdd-device" v-model="atxConfig.hdd.device" class="w-full">
-                            <NativeSelectOption value="">{{ t('settings.atxDriverNone') }}</NativeSelectOption>
-                            <NativeSelectOption v-for="dev in atxDevices.gpio_chips" :key="dev" :value="dev">{{ dev }}</NativeSelectOption>
-                          </NativeSelect>
+                          <Select v-model="atxConfig.hdd.device">
+                            <SelectTrigger id="hdd-device" class="w-full">
+                              <SelectValue :placeholder="t('settings.atxDriverNone')" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem v-for="dev in atxDevices.gpio_chips" :key="dev" :value="dev">{{ dev }}</SelectItem>
+                            </SelectContent>
+                          </Select>
                         </div>
                         <div class="space-y-2">
                           <Label for="hdd-pin">{{ t('settings.atxPin') }}</Label>
@@ -5336,7 +5385,7 @@ watch(isWindows, () => {
               </CardContent>
             </Card>
 
-            <Card v-if="!isAndroid">
+            <Card>
               <CardHeader class="flex flex-row items-start justify-between space-y-0">
                 <div class="space-y-1.5">
                   <CardTitle>{{ t('settings.onlineUpgrade') }}</CardTitle>

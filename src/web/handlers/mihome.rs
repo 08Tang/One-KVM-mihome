@@ -24,7 +24,7 @@ fn generate_sign(did: &str, action: &str, value: &str, timestamp: &str, salt: &s
     let sign_string = format!("{}{}{}{}{}", did, action, value, timestamp, salt);
     let mut hasher = Sha256::new();
     hasher.update(sign_string.as_bytes());
-    format!("{:x}", hasher.finalize())
+    hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect::<String>()
 }
 
 fn verify_sign(query: &MiHomeApiQuery, salt: &str) -> bool {
