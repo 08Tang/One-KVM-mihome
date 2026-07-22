@@ -165,7 +165,7 @@ class Reporter:
             "- 测试设备：",
             f"- 视频设备：{markdown_inline(self.user_video_device())}",
             f"- HID设备：{markdown_inline(self.user_hid_backend())}",
-            f"- 网络延迟：{markdown_inline(self.user_network_latency())}",
+            f"- HTTP 延迟：{markdown_inline(self.user_http_latency())}",
             "",
             "## 视频性能",
             "",
@@ -229,14 +229,14 @@ class Reporter:
                 return result
         return None
 
-    def user_network_latency(self) -> str:
+    def user_http_latency(self) -> str:
         result = self.find_result("network_latency")
         if not result:
             return "无数据"
-        tcp = result.data.get("tcp_connect") or {}
-        if tcp.get("samples"):
-            return format_latency_values(tcp)
-        return result.message or "无数据"
+        http = result.data.get("http_health") or {}
+        if http.get("samples"):
+            return format_latency_values(http)
+        return "无数据"
 
     def user_video_device(self) -> str:
         result = self.find_result("video_input_select")
