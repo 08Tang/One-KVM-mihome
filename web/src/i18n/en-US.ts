@@ -654,6 +654,8 @@ export default {
     otgNetworkInterface: 'Bridge Interface',
     otgNetworkNone: 'None',
     otgNetworkInterfacesLoadFailed: 'Failed to load bridge interfaces',
+    uacMic: 'USB Microphone',
+    uacMicDesc: 'Creates a virtual USB microphone on the target machine. Audio from your browser is streamed to the target.',
     otgDescriptor: 'USB Device Descriptor',
     vendorId: 'Vendor ID (VID)',
     productId: 'Product ID (PID)',

@@ -92,7 +92,8 @@ export default {
   },
   actionbar: {
     paste: '粘贴文本',
-    virtualMedia: '虚拟媒体',
+    micStart: '开始传声',
+    micStop: '停止传声',
     virtualMediaTip: '管理虚拟媒体设备',
     power: '电源',
     keyboard: '虚拟键盘',
@@ -653,6 +654,8 @@ export default {
     otgNetworkInterface: '桥接网卡',
     otgNetworkNone: '无',
     otgNetworkInterfacesLoadFailed: '无法获取桥接网卡列表',
+    uacMic: 'USB 麦克风',
+    uacMicDesc: '启用后目标机将看到一个 USB 麦克风设备，音频从浏览器传入',
     otgDescriptor: 'USB 设备描述符',
     vendorId: '厂商 ID (VID)',
     productId: '产品 ID (PID)',
