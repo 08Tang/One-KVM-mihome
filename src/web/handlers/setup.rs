@@ -65,6 +65,8 @@ pub async fn setup_init(
         ));
     }
 
+    let old_config = state.config.get();
+
     // Create single system user
     state
         .users
@@ -140,18 +142,10 @@ pub async fn setup_init(
         })
         .await?;
 
-    // Get updated config for HID reload
+    // Apply the complete USB runtime configuration, including the MSD controller.
     let new_config = state.config.get();
-
-    #[cfg(unix)]
-    {
-        if let Err(e) = state
-            .otg_service
-            .apply_config(&new_config.hid, &new_config.msd, &new_config.otg_network)
-            .await
-        {
-            tracing::warn!("Failed to apply OTG config during setup: {}", e);
-        }
+    if let Err(e) = config::apply::apply_usb_config(&state, &old_config, &new_config).await {
+        tracing::warn!("Failed to apply USB config during setup: {}", e);
     }
 
     tracing::info!(
@@ -159,25 +153,6 @@ pub async fn setup_init(
         new_config.extensions.ttyd.enabled,
         new_config.rustdesk.enabled
     );
-
-    // Initialize HID backend with new config
-    let new_hid_backend = match new_config.hid.backend {
-        crate::config::HidBackend::Otg => crate::hid::HidBackendType::Otg,
-        crate::config::HidBackend::Ch9329 => crate::hid::HidBackendType::Ch9329 {
-            port: new_config.hid.ch9329_port.clone(),
-            baud_rate: new_config.hid.ch9329_baudrate,
-            hybrid_mouse: new_config.hid.ch9329_hybrid_mouse,
-        },
-        crate::config::HidBackend::None => crate::hid::HidBackendType::None,
-    };
-
-    // Reload HID backend
-    if let Err(e) = state.hid.reload(new_hid_backend).await {
-        tracing::warn!("Failed to initialize HID backend during setup: {}", e);
-        // Don't fail setup, just warn
-    } else {
-        tracing::info!("HID backend initialized: {:?}", new_config.hid.backend);
-    }
 
     // Start extensions if enabled
     if new_config.extensions.ttyd.enabled {
