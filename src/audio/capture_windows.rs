@@ -1,198 +1,23 @@
 use bytes::Bytes;
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{BufferSize, SampleFormat, StreamConfig};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::{broadcast, watch, Mutex};
+use std::time::Duration;
+use tokio::sync::{broadcast, watch};
 use tracing::{debug, info};
 
-use crate::audio::device::{find_wasapi_device, AudioDeviceInfo};
+use super::{AudioConfig, AudioFrame, CaptureState};
+use crate::audio::device::find_wasapi_device;
 use crate::error::{AppError, Result};
-use crate::error_throttled;
 use crate::utils::LogThrottler;
 
-#[derive(Debug, Clone)]
-pub struct AudioConfig {
-    pub device_name: String,
-    pub sample_rate: u32,
-    pub channels: u32,
-    pub frame_size: u32,
-    pub buffer_frames: u32,
-    pub period_frames: u32,
-}
-
-impl Default for AudioConfig {
-    fn default() -> Self {
-        Self {
-            device_name: String::new(),
-            sample_rate: 48000,
-            channels: 2,
-            frame_size: 960,
-            buffer_frames: 4096,
-            period_frames: 960,
-        }
-    }
-}
-
-impl AudioConfig {
-    pub fn for_device(device: &AudioDeviceInfo) -> Self {
-        Self {
-            device_name: device.name.clone(),
-            ..Default::default()
-        }
-    }
-
-    pub fn bytes_per_sample(&self) -> u32 {
-        2 * self.channels
-    }
-
-    pub fn bytes_per_frame(&self) -> usize {
-        (self.frame_size * self.bytes_per_sample()) as usize
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct AudioFrame {
-    pub data: Bytes,
-    pub sample_rate: u32,
-    pub channels: u32,
-    pub samples: u32,
-    pub sequence: u64,
-    pub timestamp: Instant,
-}
-
-impl AudioFrame {
-    pub fn new_interleaved(data: Bytes, channels: u32, sample_rate: u32, sequence: u64) -> Self {
-        let bps = 2 * channels;
-        Self {
-            samples: data.len() as u32 / bps,
-            data,
-            sample_rate,
-            channels,
-            sequence,
-            timestamp: Instant::now(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CaptureState {
-    Stopped,
-    Running,
-    Error,
-}
-
-pub struct AudioCapturer {
-    config: AudioConfig,
-    state: Arc<watch::Sender<CaptureState>>,
-    state_rx: watch::Receiver<CaptureState>,
-    frame_tx: broadcast::Sender<AudioFrame>,
-    stop_flag: Arc<AtomicBool>,
-    sequence: Arc<AtomicU64>,
-    capture_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    log_throttler: LogThrottler,
-}
-
-impl AudioCapturer {
-    pub fn new(config: AudioConfig) -> Self {
-        let (state_tx, state_rx) = watch::channel(CaptureState::Stopped);
-        let (frame_tx, _) = broadcast::channel(16);
-
-        Self {
-            config,
-            state: Arc::new(state_tx),
-            state_rx,
-            frame_tx,
-            stop_flag: Arc::new(AtomicBool::new(false)),
-            sequence: Arc::new(AtomicU64::new(0)),
-            capture_handle: Mutex::new(None),
-            log_throttler: LogThrottler::with_secs(5),
-        }
-    }
-
-    pub fn state(&self) -> CaptureState {
-        *self.state_rx.borrow()
-    }
-
-    pub fn state_watch(&self) -> watch::Receiver<CaptureState> {
-        self.state_rx.clone()
-    }
-
-    pub fn subscribe(&self) -> broadcast::Receiver<AudioFrame> {
-        self.frame_tx.subscribe()
-    }
-
-    pub async fn start(&self) -> Result<()> {
-        if self.state() == CaptureState::Running {
-            return Ok(());
-        }
-
-        debug!(
-            "Starting WASAPI audio capture on {} at {}Hz {}ch",
-            self.config.device_name, self.config.sample_rate, self.config.channels
-        );
-
-        self.stop_flag.store(false, Ordering::SeqCst);
-
-        let config = self.config.clone();
-        let state = self.state.clone();
-        let frame_tx = self.frame_tx.clone();
-        let stop_flag = self.stop_flag.clone();
-        let sequence = self.sequence.clone();
-        let log_throttler = self.log_throttler.clone();
-
-        let handle = tokio::task::spawn_blocking(move || {
-            let result = run_capture(
-                &config,
-                &state,
-                &frame_tx,
-                &stop_flag,
-                &sequence,
-                &log_throttler,
-            );
-
-            if let Err(e) = result {
-                error_throttled!(
-                    log_throttler,
-                    "capture_error",
-                    "WASAPI audio capture error: {}",
-                    e
-                );
-                let _ = state.send(CaptureState::Error);
-            } else {
-                let _ = state.send(CaptureState::Stopped);
-            }
-        });
-
-        *self.capture_handle.lock().await = Some(handle);
-        Ok(())
-    }
-
-    pub async fn stop(&self) -> Result<()> {
-        info!("Stopping WASAPI audio capture");
-        self.stop_flag.store(true, Ordering::SeqCst);
-
-        if let Some(handle) = self.capture_handle.lock().await.take() {
-            let _ = handle.await;
-        }
-
-        let _ = self.state.send(CaptureState::Stopped);
-        Ok(())
-    }
-
-    pub fn is_running(&self) -> bool {
-        self.state() == CaptureState::Running
-    }
-}
-
-fn run_capture(
+pub(super) fn run_capture(
     config: &AudioConfig,
     state: &watch::Sender<CaptureState>,
     frame_tx: &broadcast::Sender<AudioFrame>,
     stop_flag: &AtomicBool,
-    sequence: &AtomicU64,
     log_throttler: &LogThrottler,
 ) -> Result<()> {
     let device = find_wasapi_device(&config.device_name)?;
@@ -272,12 +97,10 @@ fn run_capture(
                 if samples.is_empty() {
                     continue;
                 }
-                let seq = sequence.fetch_add(1, Ordering::Relaxed);
                 let frame = AudioFrame::new_interleaved(
                     Bytes::copy_from_slice(bytemuck::cast_slice(&samples)),
                     2,
                     48_000,
-                    seq,
                 );
                 if frame_tx.receiver_count() > 0 {
                     if let Err(e) = frame_tx.send(frame) {

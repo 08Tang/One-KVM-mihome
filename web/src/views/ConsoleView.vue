@@ -14,6 +14,7 @@ import { useComputerUseSocket, type ComputerUseServerMessage } from '@/composabl
 import { useFeatureVisibility } from '@/composables/useFeatureVisibility'
 import { useTheme } from '@/composables/useTheme'
 import { getUnifiedAudio } from '@/composables/useUnifiedAudio'
+import { getMicrophone } from '@/composables/useMicrophone'
 import { streamApi, hidApi, atxApi, atxConfigApi, authApi, computerUseApi, uacApi } from '@/api'
 import type { ComputerUseScreenshot, ComputerUseSession } from '@/api'
 import { CanonicalKey, HidBackend } from '@/types/generated'
@@ -76,6 +77,11 @@ const { connected: wsConnected, networkError: wsNetworkError } = useWebSocket()
 const hidWs = useHidWebSocket()
 const webrtc = useWebRTC()
 const unifiedAudio = getUnifiedAudio()
+const microphone = getMicrophone()
+const uacEnabled = ref(false)
+const microphoneTransferEnabled = computed(() => (
+  uacEnabled.value && configStore.hid?.backend === HidBackend.Otg
+))
 const videoSession = useVideoSession()
 
 const consoleEvents = useConsoleEvents({
@@ -468,14 +474,6 @@ const hidDetails = computed<StatusDetail[]>(() => {
   return details
 })
 
-const audioStatus = computed<'connected' | 'connecting' | 'disconnected' | 'error'>(() => {
-  const audio = systemStore.audio
-  if (!audio?.available) return 'disconnected'
-  if (audio.error) return 'error'
-  if (audio.streaming) return 'connected'
-  return 'disconnected'
-})
-
 function translateAudioQuality(quality: string | undefined): string {
   if (!quality) return t('common.unknown')
   const qualityLower = quality.toLowerCase()
@@ -485,26 +483,81 @@ function translateAudioQuality(quality: string | undefined): string {
   return quality
 }
 
+const microphoneTransferStatus = computed<{
+  text: string
+  card: 'connected' | 'connecting' | 'disconnected' | 'error'
+  detail?: StatusDetail['status']
+}>(() => {
+  switch (microphone.state.value) {
+    case 'starting':
+      return { text: t('statusCard.transferStarting'), card: 'connecting', detail: 'warning' }
+    case 'streaming':
+      if (microphone.targetState.value === 'active') {
+        return { text: t('statusCard.transferActive'), card: 'connected', detail: 'ok' }
+      }
+      if (microphone.targetState.value === 'stalled') {
+        return { text: t('statusCard.transferStalled'), card: 'connecting', detail: 'warning' }
+      }
+      return { text: t('statusCard.transferWaiting'), card: 'connecting', detail: 'warning' }
+    case 'stopping':
+      return { text: t('statusCard.transferStopping'), card: 'connecting', detail: 'warning' }
+    case 'error':
+      return { text: t('statusCard.transferError'), card: 'error', detail: 'error' }
+    case 'idle':
+    default:
+      return { text: t('statusCard.transferIdle'), card: 'disconnected' }
+  }
+})
+
+const audioStatus = computed<'connected' | 'connecting' | 'disconnected' | 'error'>(() => {
+  const transfer = microphoneTransferEnabled.value ? microphoneTransferStatus.value : null
+  if (systemStore.audio?.error || transfer?.card === 'error') return 'error'
+  if (transfer?.card === 'connecting') return 'connecting'
+  if (systemStore.audio?.streaming || transfer?.card === 'connected') return 'connected'
+  return 'disconnected'
+})
+
 const audioQuickInfo = computed(() => {
   const audio = systemStore.audio
-  if (!audio?.available) return ''
-  if (audio.streaming) return translateAudioQuality(audio.quality)
-  return t('statusCard.off')
+  const playback = audio?.streaming
+    ? t('statusCard.playbackActive')
+    : t('statusCard.playbackStopped')
+  return microphoneTransferEnabled.value
+    ? `${playback} · ${microphoneTransferStatus.value.text}`
+    : playback
 })
 
 const audioErrorMessage = computed(() => {
-  return systemStore.audio?.error || ''
+  if (systemStore.audio?.error) return systemStore.audio.error
+  if (!microphoneTransferEnabled.value) return ''
+  const code = microphone.errorCode.value
+  if (microphone.state.value === 'error' && code) {
+    return t(`actionbar.micError.${code}`)
+  }
+  return ''
 })
 
 const audioDetails = computed<StatusDetail[]>(() => {
   const audio = systemStore.audio
-  if (!audio) return []
-
-  return [
-    { label: t('statusCard.device'), value: audio.device || t('statusCard.defaultDevice') },
-    { label: t('statusCard.quality'), value: translateAudioQuality(audio.quality) },
-    { label: t('statusCard.streaming'), value: audio.streaming ? t('common.yes') : t('common.no'), status: audio.streaming ? 'ok' : undefined },
+  const details: StatusDetail[] = [
+    {
+      label: t('statusCard.audioPlayback'),
+      value: audio?.streaming ? t('statusCard.playbackActive') : t('statusCard.playbackStopped'),
+      status: audio?.error ? 'error' : audio?.streaming ? 'ok' : undefined,
+    },
   ]
+  if (microphoneTransferEnabled.value) {
+    details.push({
+      label: t('statusCard.audioTransfer'),
+      value: microphoneTransferStatus.value.text,
+      status: microphoneTransferStatus.value.detail,
+    })
+  }
+  details.push(
+    { label: t('statusCard.device'), value: audio?.device || t('statusCard.defaultDevice') },
+    { label: t('statusCard.quality'), value: translateAudioQuality(audio?.quality) },
+  )
+  return details
 })
 
 const msdStatus = computed<'connected' | 'connecting' | 'disconnected' | 'error'>(() => {
@@ -2924,6 +2977,7 @@ async function activateConsoleView() {
 
 function deactivateConsoleView() {
   isConsoleActive.value = false
+  void microphone.stop()
   handleBlur()
   exitPointerLock()
   unregisterInteractionListeners()
@@ -2961,14 +3015,21 @@ function handleToggleMouseMode() {
   }
 }
 
-const uacEnabled = ref(false)
+async function refreshUacAvailability() {
+  try {
+    const uacConfig = await uacApi.get()
+    uacEnabled.value = uacConfig.enabled
+  } catch {
+    uacEnabled.value = false
+  }
+}
+
+watch(microphoneTransferEnabled, enabled => {
+  if (!enabled) void microphone.stop()
+})
 
 onMounted(async () => {
-  // Check if UAC is enabled (show mic button only if USB mic is available)
-  try {
-    const uacCfg = await uacApi.get()
-    uacEnabled.value = uacCfg.enabled
-  } catch { /* ignore */ }
+  await refreshUacAvailability()
 
   consoleEvents.subscribe()
 
@@ -3009,6 +3070,7 @@ onMounted(async () => {
 })
 
 onActivated(() => {
+  void refreshUacAvailability()
   void activateConsoleView()
 })
 
@@ -3096,7 +3158,6 @@ onUnmounted(() => {
                 :details="videoDetails"
               />
               <StatusCard
-                v-if="systemStore.audio?.available"
                 :title="t('statusCard.audio')"
                 type="audio"
                 :status="audioStatus"
@@ -3174,7 +3235,7 @@ onUnmounted(() => {
       :show-terminal="showTerminal"
       :show-computer-use="showComputerUse"
       :show-paste-text="showPasteText"
-      :show-mic="uacEnabled"
+      :show-mic="microphoneTransferEnabled"
       @toggle-fullscreen="toggleFullscreen"
       @toggle-stats="openStatsSheet"
       @toggle-virtual-keyboard="handleToggleVirtualKeyboard"

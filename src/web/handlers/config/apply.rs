@@ -76,7 +76,7 @@ async fn reconcile_otg_config(
     hid: &HidConfig,
     msd: &MsdConfig,
     network: &OtgNetworkConfig,
-    uac: &crate::otg::service::UacConfig,
+    uac: &UacConfig,
 ) -> Result<()> {
     #[cfg(not(unix))]
     {
@@ -195,6 +195,7 @@ pub async fn apply_hid_config(
     new_config: &HidConfig,
     msd_config: &MsdConfig,
     network_config: &OtgNetworkConfig,
+    uac_config: &UacConfig,
     options: ConfigApplyOptions,
 ) -> Result<()> {
     new_config.validate_otg_functions()?;
@@ -237,7 +238,7 @@ pub async fn apply_hid_config(
     }
 
     if otg_config_changed {
-        reconcile_otg_config(state, new_config, msd_config, network_config, &state.config.get().uac).await?;
+        reconcile_otg_config(state, new_config, msd_config, network_config, uac_config).await?;
     }
 
     if !transitioning_away_from_otg {
@@ -263,6 +264,7 @@ pub async fn apply_msd_config(
     new_config: &MsdConfig,
     hid_config: &HidConfig,
     network_config: &OtgNetworkConfig,
+    uac_config: &UacConfig,
     options: ConfigApplyOptions,
 ) -> Result<()> {
     let hid_backend_is_otg = hid_config.backend == HidBackend::Otg;
@@ -305,7 +307,7 @@ pub async fn apply_msd_config(
     if new_msd_enabled {
         tracing::info!("(Re)initializing MSD...");
 
-        reconcile_otg_config(state, hid_config, new_config, network_config, &state.config.get().uac).await?;
+        reconcile_otg_config(state, hid_config, new_config, network_config, uac_config).await?;
 
         let mut msd_guard = state.msd.write().await;
         if let Some(msd) = msd_guard.as_mut() {
@@ -340,7 +342,7 @@ pub async fn apply_msd_config(
         *msd_guard = None;
         tracing::info!("MSD shutdown complete");
 
-        reconcile_otg_config(state, hid_config, new_config, network_config, &state.config.get().uac).await?;
+        reconcile_otg_config(state, hid_config, new_config, network_config, uac_config).await?;
     }
 
     if hid_config.backend == HidBackend::Otg
@@ -367,10 +369,29 @@ pub async fn apply_usb_config(
             old_config.hid.backend == HidBackend::Otg && new_config.hid.backend != HidBackend::Otg;
 
         let hid_unchanged = old_config.hid == new_config.hid;
-        let otg_gadget_rebuilt =
-            old_config.msd != new_config.msd
-                || old_config.otg_network != new_config.otg_network
-                || old_config.uac != new_config.uac;
+        let otg_gadget_rebuilt = old_config.msd != new_config.msd
+            || old_config.otg_network != new_config.otg_network
+            || old_config.uac != new_config.uac
+            || old_config.hid.otg_udc != new_config.hid.otg_udc
+            || old_config.hid.otg_descriptor != new_config.hid.otg_descriptor
+            || old_config.hid.backend != new_config.hid.backend
+            || old_config.hid.constrained_otg_functions()
+                != new_config.hid.constrained_otg_functions()
+            || old_config.hid.effective_otg_keyboard_leds()
+                != new_config.hid.effective_otg_keyboard_leds();
+        let restart_uac_playback =
+            old_config.uac != new_config.uac || (new_config.uac.enabled && otg_gadget_rebuilt);
+
+        // A bound ALSA handle refers to the old configfs function. Stop it
+        // before any gadget teardown so the worker cannot write through a
+        // disappearing PCM node. It is restarted only after every reconcile.
+        if restart_uac_playback {
+            let playback = state.uac_playback.write().await.take();
+            if let Some(playback) = playback {
+                playback.stop();
+                tracing::info!("UAC playback writer stopped before OTG reconcile");
+            }
+        }
 
         if transitioning_away_from_otg {
             apply_hid_config(
@@ -379,6 +400,7 @@ pub async fn apply_usb_config(
                 &new_config.hid,
                 &new_config.msd,
                 &new_config.otg_network,
+                &new_config.uac,
                 ConfigApplyOptions::default(),
             )
             .await?;
@@ -397,6 +419,7 @@ pub async fn apply_usb_config(
                 &new_config.hid,
                 &new_config.msd,
                 &new_config.otg_network,
+                &new_config.uac,
                 ConfigApplyOptions::default(),
             )
             .await?;
@@ -408,37 +431,9 @@ pub async fn apply_usb_config(
         if hid_unchanged && otg_gadget_rebuilt && new_config.hid.backend == HidBackend::Otg {
             tracing::info!("OTG gadget rebuilt, reloading HID backend for new devices");
             let hid_backend = hid_backend_type(&new_config.hid);
-            state
-                .hid
-                .reload(hid_backend)
-                .await
-                .map_err(|e| AppError::Config(format!("HID reload after gadget rebuild failed: {}", e)))?;
-        }
-
-        // UAC playback writer lifecycle
-        if old_config.uac.enabled != new_config.uac.enabled {
-            let mut guard = state.uac_playback.write().await;
-            if new_config.uac.enabled {
-                let config = crate::audio::uac_streamer::UacPlaybackConfig {
-                    sample_rate: new_config.uac.sample_rate,
-                    channels: new_config.uac.channels as u16,
-                    ..Default::default()
-                };
-                match crate::audio::uac_streamer::UacPlaybackWriter::start(config) {
-                    Ok(writer) => {
-                        tracing::info!("UAC playback writer started");
-                        *guard = Some(writer);
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to start UAC playback writer: {}", e);
-                    }
-                }
-            } else {
-                if let Some(writer) = guard.take() {
-                    writer.stop();
-                    tracing::info!("UAC playback writer stopped");
-                }
-            }
+            state.hid.reload(hid_backend).await.map_err(|e| {
+                AppError::Config(format!("HID reload after gadget rebuild failed: {}", e))
+            })?;
         }
 
         apply_msd_config(
@@ -447,9 +442,29 @@ pub async fn apply_usb_config(
             &new_config.msd,
             &new_config.hid,
             &new_config.otg_network,
+            &new_config.uac,
             ConfigApplyOptions::default(),
         )
-        .await
+        .await?;
+
+        // apply_msd_config may perform a second gadget reconcile. Resolve the
+        // new ALSA card only after that final rebuild, then publish the worker.
+        if restart_uac_playback && new_config.uac.enabled {
+            let config = crate::audio::uac::UacPlaybackConfig {
+                sample_rate: new_config.uac.sample_rate,
+                channels: new_config.uac.channels as u16,
+                ..Default::default()
+            };
+            let writer = crate::audio::uac::UacPlayback::start(config).map_err(|error| {
+                AppError::Config(format!("Failed to start UAC playback: {error}"))
+            })?;
+            *state.uac_playback.write().await = Some(writer);
+            tracing::info!("UAC playback writer started after OTG reconcile");
+        } else if restart_uac_playback {
+            tracing::info!("UAC playback remains disabled");
+        }
+
+        Ok(())
     }
 
     #[cfg(not(unix))]
@@ -460,6 +475,7 @@ pub async fn apply_usb_config(
             &new_config.hid,
             &new_config.msd,
             &new_config.otg_network,
+            &new_config.uac,
             ConfigApplyOptions::default(),
         )
         .await

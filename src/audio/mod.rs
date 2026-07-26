@@ -1,18 +1,18 @@
 //! Platform audio capture, Opus encode, device enumeration, streaming, controller, health monitor.
 
 #[cfg(any(unix, windows))]
-pub mod capture;
-pub mod controller;
+mod capture;
+mod controller;
 #[cfg(any(unix, windows))]
-pub mod device;
+mod device;
 #[cfg(any(unix, windows))]
-pub mod encoder;
-pub mod monitor;
-pub mod recovery;
-pub mod streamer;
-pub mod types;
-pub mod uac_streamer;
-pub mod uac_websocket;
+mod encoder;
+mod monitor;
+mod recovery;
+mod streamer;
+mod types;
+#[cfg(unix)]
+pub mod uac;
 
 pub use capture::{AudioCapturer, AudioConfig, AudioFrame};
 pub use controller::AudioController;

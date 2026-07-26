@@ -10,6 +10,7 @@ mod computer_use;
 mod hid;
 mod otg_network;
 mod stream;
+mod uac;
 mod watchdog;
 mod web;
 
@@ -19,6 +20,7 @@ pub use computer_use::*;
 pub use hid::*;
 pub use otg_network::*;
 pub use stream::*;
+pub use uac::*;
 pub use watchdog::*;
 pub use web::*;
 
@@ -44,7 +46,7 @@ pub struct AppConfig {
     pub rtsp: RtspConfig,
     pub redfish: RedfishConfig,
     pub watchdog: WatchdogConfig,
-    pub uac: crate::otg::service::UacConfig,
+    pub uac: UacConfig,
 }
 
 impl AppConfig {

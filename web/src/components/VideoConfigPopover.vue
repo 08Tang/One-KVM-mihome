@@ -5,7 +5,6 @@ import { toast } from 'vue-sonner'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Separator } from '@/components/ui/separator'
-import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select'
 import {
   Popover,
   PopoverContent,
@@ -316,6 +315,16 @@ const availableFps = computed(() => {
 
 const selectedFormatInfo = computed(() =>
   availableFormatOptions.value.find(format => format.format === selectedFormat.value) ?? null
+)
+
+const selectedDeviceInfo = computed(() =>
+  devices.value.find(device => device.path === selectedDevice.value) ?? null
+)
+
+const selectedResolutionInfo = computed(() =>
+  availableResolutions.value.find(
+    resolution => `${resolution.width}x${resolution.height}` === selectedResolution.value,
+  ) ?? null
 )
 
 const selectedCodecInfo = computed(() => {
@@ -744,22 +753,32 @@ watch(
           <!-- Device Selection -->
           <div class="space-y-2">
             <Label class="text-xs text-muted-foreground">{{ t('actionbar.videoDevice') }}</Label>
-            <NativeSelect
+            <Select
               :model-value="selectedDevice"
               @update:model-value="handleDeviceChange"
               :disabled="loadingDevices || devices.length === 0"
-              size="sm" class="w-full text-xs"
             >
-                <NativeSelectOption value="">{{ loadingDevices ? t('common.loading') : t('actionbar.selectDevice') }}</NativeSelectOption>
-                <NativeSelectOption
+              <SelectTrigger size="sm" class="w-full text-xs">
+                <span v-if="selectedDeviceInfo" class="min-w-0 truncate">
+                  {{ formatVideoDeviceLabel(selectedDeviceInfo) }}
+                </span>
+                <span v-else class="text-muted-foreground">
+                  {{ loadingDevices ? t('common.loading') : t('actionbar.selectDevice') }}
+                </span>
+              </SelectTrigger>
+              <SelectContent class="max-w-[min(360px,calc(100vw-2rem))]">
+                <SelectItem
                   v-for="device in devices"
                   :key="device.path"
                   :value="device.path"
                   class="text-xs"
                 >
-                  {{ formatVideoDeviceLabel(device) }}
-                </NativeSelectOption>
-            </NativeSelect>
+                  <span class="block min-w-0 truncate" :title="formatVideoDeviceLabel(device)">
+                    {{ formatVideoDeviceLabel(device) }}
+                  </span>
+                </SelectItem>
+              </SelectContent>
+            </Select>
           </div>
 
           <!-- Format Selection -->
@@ -825,43 +844,55 @@ watch(
           <!-- Resolution Selection -->
           <div class="space-y-2">
             <Label class="text-xs text-muted-foreground">{{ t('actionbar.videoResolution') }}</Label>
-            <NativeSelect
+            <Select
               :model-value="selectedResolution"
               @update:model-value="handleResolutionChange"
               :disabled="!selectedFormat || availableResolutions.length === 0"
-              size="sm" class="w-full text-xs"
             >
-                <NativeSelectOption value="">{{ t('actionbar.selectResolution') }}</NativeSelectOption>
-                <NativeSelectOption
+              <SelectTrigger size="sm" class="w-full text-xs">
+                <span v-if="selectedResolutionInfo">
+                  {{ selectedResolutionInfo.width }} × {{ selectedResolutionInfo.height }}
+                </span>
+                <span v-else class="text-muted-foreground">{{ t('actionbar.selectResolution') }}</span>
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem
                   v-for="res in availableResolutions"
                   :key="`${res.width}x${res.height}`"
                   :value="`${res.width}x${res.height}`"
                   class="text-xs"
                 >
-                  {{ res.width }} x {{ res.height }}
-                </NativeSelectOption>
-            </NativeSelect>
+                  {{ res.width }} × {{ res.height }}
+                </SelectItem>
+              </SelectContent>
+            </Select>
           </div>
 
           <!-- FPS Selection -->
           <div class="space-y-2">
             <Label class="text-xs text-muted-foreground">{{ t('actionbar.videoFps') }}</Label>
-            <NativeSelect
+            <Select
               :model-value="String(selectedFps)"
               @update:model-value="handleFpsChange"
               :disabled="!selectedResolution || availableFps.length === 0"
-              size="sm" class="w-full text-xs"
             >
-                <NativeSelectOption value="">{{ t('actionbar.selectFps') }}</NativeSelectOption>
-                <NativeSelectOption
+              <SelectTrigger size="sm" class="w-full text-xs">
+                <span v-if="selectedResolution && availableFps.includes(selectedFps)">
+                  {{ formatFpsLabel(selectedFps) }}
+                </span>
+                <span v-else class="text-muted-foreground">{{ t('actionbar.selectFps') }}</span>
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem
                   v-for="fps in availableFps"
                   :key="fps"
                   :value="String(fps)"
                   class="text-xs"
                 >
                   {{ formatFpsLabel(fps) }}
-                </NativeSelectOption>
-            </NativeSelect>
+                </SelectItem>
+              </SelectContent>
+            </Select>
           </div>
 
           <!-- Apply Button -->

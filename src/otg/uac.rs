@@ -6,7 +6,7 @@ use super::configfs::{create_dir, create_symlink, remove_dir, write_file};
 use super::function::GadgetFunction;
 use crate::error::{AppError, Result};
 
-/// USB Audio Class 2.0 (UAC1) gadget function.
+/// USB Audio Class 1.0 gadget function.
 ///
 /// Creates a virtual USB microphone that the USB host sees as a standard
 /// USB audio input device. Audio written to the PCM playback device on the
@@ -60,13 +60,18 @@ impl GadgetFunction for UacFunction {
         let chmask: u32 = (1u32 << self.channels) - 1;
         write_file(&func_path.join("p_chmask"), &chmask.to_string())?;
         write_file(&func_path.join("p_srate"), &self.sample_rate.to_string())?;
-        write_file(&func_path.join("p_ssize"), "2")?; // 16-bit S16LE
+        // 16-bit S16LE.
+        write_file(&func_path.join("p_ssize"), "2")?;
+        // One decibel per step. The kernel default is 1/256 dB, which creates
+        // 25,600 control values and triggers a UAC volume-range warning.
+        write_file(&func_path.join("p_volume_res"), "256")?;
         // UAC1 does not need p_hs_bint — Windows has native built-in
         // UAC1 drivers and handles isochronous streaming automatically.
 
         // Only enable playback direction (gadget → host = mic).
         // Disabling capture saves one isochronous endpoint.
         write_file(&func_path.join("c_chmask"), "0")?;
+        write_file(&func_path.join("c_volume_present"), "0")?;
 
         // req_number=4: explicitly allocate 4 USB requests for the
         // isochronous endpoint.  Default (0 = auto) may not be enough

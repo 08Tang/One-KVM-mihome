@@ -3376,10 +3376,7 @@ watch(isWindows, () => {
                       </div>
                       <div class="space-y-3 rounded-md border border-border/60 p-3">
                         <div class="flex items-center justify-between gap-4">
-                          <div>
-                            <Label>{{ t('settings.uacMic') }}</Label>
-                            <p class="text-xs text-muted-foreground">{{ t('settings.uacMicDesc') }}</p>
-                          </div>
+                          <Label>{{ t('settings.uacMic') }}</Label>
                           <Switch v-model="config.uac_enabled" />
                         </div>
                       </div>

@@ -13,6 +13,7 @@ use tower_http::{
 
 use super::audio_ws::audio_ws_handler;
 use super::handlers;
+#[cfg(unix)]
 use super::uac_ws::uac_audio_ws_handler;
 use super::ws::ws_handler;
 use crate::auth::auth_middleware;
@@ -101,7 +102,6 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/audio/devices", get(handlers::list_audio_devices))
         // Audio WebSocket endpoint
         .route("/ws/audio", any(audio_ws_handler))
-        .route("/ws/uac-audio", any(uac_audio_ws_handler))
         // Configuration management (domain-separated endpoints)
         .route("/config", get(handlers::config::get_all_config))
         .route("/config/video", get(handlers::config::get_video_config))
@@ -264,6 +264,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     #[cfg(unix)]
     let user_routes = {
         user_routes
+            .route("/ws/uac-audio", any(uac_audio_ws_handler))
             .route("/hid/otg/self-check", get(handlers::hid_otg_self_check))
             .route("/config/msd", get(handlers::config::get_msd_config))
             .route("/config/msd", patch(handlers::config::update_msd_config))
@@ -280,14 +281,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
                 "/otg/network/status",
                 get(handlers::config::get_otg_network_status),
             )
-            .route(
-                "/config/uac",
-                get(handlers::config::get_uac_config),
-            )
-            .route(
-                "/config/uac",
-                patch(handlers::config::update_uac_config),
-            )
+            .route("/config/uac", get(handlers::config::get_uac_config))
+            .route("/config/uac", patch(handlers::config::update_uac_config))
             .route("/msd/status", get(handlers::msd_status))
             .route("/msd/images", get(handlers::msd_images_list))
             .route("/msd/images/download", post(handlers::msd_image_download))

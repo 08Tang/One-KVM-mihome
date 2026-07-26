@@ -9,38 +9,9 @@ use super::manager::{wait_for_hid_devices, GadgetDescriptor, OtgGadgetManager};
 use super::msd::MsdFunction;
 use crate::config::{
     HidBackend, HidConfig, MsdConfig, OtgDescriptorConfig, OtgHidFunctions, OtgNetworkConfig,
+    UacConfig,
 };
 use crate::error::{AppError, Result};
-
-/// Configuration for the USB Audio Class (UAC) gadget function.
-#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-#[serde(default)]
-pub struct UacConfig {
-    /// Enable the virtual USB microphone.
-    pub enabled: bool,
-    /// Sample rate in Hz (e.g. 48000).
-    pub sample_rate: u32,
-    /// Number of channels (1=mono, 2=stereo).
-    pub channels: u8,
-}
-
-impl UacConfig {
-    pub fn validate(&self) -> Result<()> {
-        if self.sample_rate != 0 && (self.sample_rate < 8000 || self.sample_rate > 384000) {
-            return Err(AppError::BadRequest(format!(
-                "UAC sample rate {} out of range (8000-384000)",
-                self.sample_rate
-            )));
-        }
-        if self.channels != 0 && self.channels > 8 {
-            return Err(AppError::BadRequest(format!(
-                "UAC channel count {} out of range (1-8)",
-                self.channels
-            )));
-        }
-        Ok(())
-    }
-}
 
 #[derive(Debug, Clone, Default)]
 pub struct HidDevicePaths {
@@ -92,7 +63,7 @@ pub(crate) struct OtgDesiredState {
     pub msd_enabled: bool,
     pub msd_lun_capacity: u8,
     pub network: OtgNetworkConfig,
-    pub uac_enabled: bool,
+    pub uac: UacConfig,
 }
 
 impl Default for OtgDesiredState {
@@ -105,7 +76,7 @@ impl Default for OtgDesiredState {
             msd_enabled: false,
             msd_lun_capacity: 1,
             network: OtgNetworkConfig::default(),
-            uac_enabled: false,
+            uac: UacConfig::default(),
         }
     }
 }
@@ -127,8 +98,7 @@ impl OtgDesiredState {
         };
 
         hid.validate_otg_functions()?;
-        let needs_udc =
-            hid_functions.is_some() || msd.enabled || network.enabled || uac.enabled;
+        let needs_udc = hid_functions.is_some() || msd.enabled || network.enabled || uac.enabled;
         let udc = if needs_udc {
             hid.otg_udc
                 .as_ref()
@@ -146,7 +116,11 @@ impl OtgDesiredState {
             msd_enabled: msd.enabled,
             msd_lun_capacity: 1,
             network: network.clone(),
-            uac_enabled: uac.enabled,
+            uac: if uac.enabled {
+                uac.clone()
+            } else {
+                UacConfig::default()
+            },
         })
     }
 
@@ -169,7 +143,7 @@ struct OtgServiceState {
     pub msd_enabled: bool,
     pub msd_lun_capacity: u8,
     pub network: OtgNetworkConfig,
-    pub uac_enabled: bool,
+    pub uac: UacConfig,
     pub configured_udc: Option<String>,
     pub hid_paths: Option<HidDevicePaths>,
     pub hid_functions: Option<OtgHidFunctions>,
@@ -187,7 +161,7 @@ impl Default for OtgServiceState {
             msd_enabled: false,
             msd_lun_capacity: 1,
             network: OtgNetworkConfig::default(),
-            uac_enabled: false,
+            uac: UacConfig::default(),
             configured_udc: None,
             hid_paths: None,
             hid_functions: None,
@@ -349,7 +323,7 @@ impl OtgService {
             desired.hid_enabled(),
             desired.msd_enabled,
             desired.network_enabled(),
-            desired.uac_enabled,
+            desired.uac.enabled,
             desired.udc
         );
 
@@ -361,7 +335,7 @@ impl OtgService {
                 && state.msd_enabled == desired.msd_enabled
                 && state.msd_lun_capacity == desired.msd_lun_capacity
                 && state.network == desired.network
-                && state.uac_enabled == desired.uac_enabled
+                && state.uac == desired.uac
                 && state.configured_udc == desired.udc
                 && state.hid_functions == desired.hid_functions
                 && state.keyboard_leds_enabled == desired.keyboard_leds
@@ -401,7 +375,7 @@ impl OtgService {
             state.msd_enabled = false;
             state.msd_lun_capacity = 1;
             state.network = OtgNetworkConfig::default();
-            state.uac_enabled = false;
+            state.uac = UacConfig::default();
             state.configured_udc = None;
             state.hid_paths = None;
             state.hid_functions = None;
@@ -410,7 +384,11 @@ impl OtgService {
             state.error = None;
         }
 
-        if !desired.hid_enabled() && !desired.msd_enabled && !desired.network_enabled() {
+        if !desired.hid_enabled()
+            && !desired.msd_enabled
+            && !desired.network_enabled()
+            && !desired.uac.enabled
+        {
             info!("OTG desired state is empty, gadget removed");
             return Ok(());
         }
@@ -440,12 +418,12 @@ impl OtgService {
         // lower hardware endpoint number.  DWC3 seems to have
         // trouble with isochronous transfers on higher-numbered
         // endpoints when they follow interrupt endpoints.
-        let _uac_func = if desired.uac_enabled {
-            let sample_rate: u32 = 48000;
-            let channels: u8 = 2;
-            Some(manager.add_uac(sample_rate, channels).map_err(|e| {
-                AppError::Internal(format!("Failed to add UAC function: {e}"))
-            })?)
+        let _uac_func = if desired.uac.enabled {
+            Some(
+                manager
+                    .add_uac(desired.uac.sample_rate, desired.uac.channels)
+                    .map_err(|e| AppError::Internal(format!("Failed to add UAC function: {e}")))?,
+            )
         } else {
             None
         };
@@ -594,7 +572,7 @@ impl OtgService {
             state.msd_enabled = desired.msd_enabled;
             state.msd_lun_capacity = desired.msd_lun_capacity;
             state.network = desired.network.clone();
-            state.uac_enabled = desired.uac_enabled;
+            state.uac = desired.uac.clone();
             state.configured_udc = Some(udc);
             state.hid_paths = hid_paths;
             state.hid_functions = desired.hid_functions;
@@ -732,7 +710,8 @@ mod tests {
             ..OtgNetworkConfig::default()
         };
 
-        let desired = OtgDesiredState::from_config(&hid, &msd, &network).unwrap();
+        let desired =
+            OtgDesiredState::from_config(&hid, &msd, &network, &UacConfig::default()).unwrap();
 
         assert_eq!(desired.udc.as_deref(), Some("c9040000.usb"));
         assert_eq!(desired.hid_functions, Some(OtgHidFunctions::full()));

@@ -1,22 +1,9 @@
 use alsa::pcm::HwParams;
 use alsa::{Direction, PCM};
-use serde::Serialize;
 use tracing::{debug, info, warn};
 
+use super::AudioDeviceInfo;
 use crate::error::{AppError, Result};
-
-#[derive(Debug, Clone, Serialize)]
-pub struct AudioDeviceInfo {
-    pub name: String,
-    pub description: String,
-    pub card_index: i32,
-    pub device_index: i32,
-    pub sample_rates: Vec<u32>,
-    pub channels: Vec<u32>,
-    pub is_capture: bool,
-    pub is_hdmi: bool,
-    pub usb_bus: Option<String>,
-}
 
 fn get_usb_bus_info(card_index: i32) -> Option<String> {
     if card_index < 0 {
@@ -28,26 +15,18 @@ fn get_usb_bus_info(card_index: i32) -> Option<String> {
     let link_str = link_target.to_string_lossy();
 
     for component in link_str.split('/') {
-        if component.contains('-') && !component.contains(':') {
-            if component
-                .chars()
-                .next()
-                .map(|c| c.is_ascii_digit())
-                .unwrap_or(false)
-            {
-                return Some(component.to_string());
-            }
+        if component.contains('-')
+            && !component.contains(':')
+            && component.chars().next().is_some_and(|c| c.is_ascii_digit())
+        {
+            return Some(component.to_string());
         }
     }
 
     None
 }
 
-pub fn enumerate_audio_devices() -> Result<Vec<AudioDeviceInfo>> {
-    enumerate_audio_devices_with_current(None)
-}
-
-pub fn enumerate_audio_devices_with_current(
+pub(super) fn enumerate_audio_devices_with_current(
     current_device: Option<&str>,
 ) -> Result<Vec<AudioDeviceInfo>> {
     let mut devices = Vec::new();
@@ -153,8 +132,8 @@ fn query_device_caps(pcm: &PCM) -> (Vec<u32>, Vec<u32>) {
     (supported_rates, supported_channels)
 }
 
-pub fn find_best_audio_device() -> Result<AudioDeviceInfo> {
-    let devices = enumerate_audio_devices()?;
+pub(super) fn find_best_audio_device() -> Result<AudioDeviceInfo> {
+    let devices = enumerate_audio_devices_with_current(None)?;
 
     if devices.is_empty() {
         return Err(AppError::AudioError(
@@ -194,7 +173,7 @@ mod tests {
 
     #[test]
     fn test_enumerate_devices() {
-        let result = enumerate_audio_devices();
+        let result = enumerate_audio_devices_with_current(None);
         println!("Audio devices: {:?}", result);
         assert!(result.is_ok());
     }

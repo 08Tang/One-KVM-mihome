@@ -42,9 +42,9 @@ pub use rustdesk::{
     regenerate_device_password, start_rustdesk_service, stop_rustdesk_service,
     update_rustdesk_config,
 };
+pub use stream::{get_stream_config, update_stream_config};
 #[cfg(unix)]
 pub use uac::{get_uac_config, update_uac_config};
-pub use stream::{get_stream_config, update_stream_config};
 pub use video::{get_video_config, update_video_config};
 pub use vnc::{
     get_vnc_config, get_vnc_status, start_vnc_service, stop_vnc_service, update_vnc_config,

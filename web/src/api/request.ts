@@ -55,6 +55,14 @@ function getToastKey(endpoint: string, config?: ApiRequestConfig): string {
 
 function getErrorMessage(data: unknown, fallback: string): string {
   if (data && typeof data === 'object') {
+    const code = (data as any).code
+    const keyByCode: Record<string, string> = {
+      MSD_MEDIUM_REMOVAL_PREVENTED: 'msd.errors.mediumRemovalPrevented',
+      MSD_DISCONNECT_FAILED: 'msd.errors.disconnectFailed',
+    }
+    const key = typeof code === 'string' ? keyByCode[code] : undefined
+    if (key && hasTranslation(key)) return t(key)
+
     const message = (data as any).message
     if (typeof message === 'string' && message.trim()) return localizeBackendErrorMessage(message)
   }

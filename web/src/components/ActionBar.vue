@@ -3,7 +3,6 @@ import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { useSystemStore } from '@/stores/system'
-import { getMicrophone } from '@/composables/useMicrophone'
 import { Button } from '@/components/ui/button'
 import { ButtonGroup } from '@/components/ui/button-group'
 import {
@@ -32,7 +31,6 @@ import {
 } from '@/components/ui/sheet'
 import {
   ClipboardPaste,
-  Mic,
   HardDrive,
   Keyboard,
   Settings,
@@ -75,7 +73,6 @@ const props = defineProps<{
 const showStats = computed(() => (props.videoMode ?? 'mjpeg') !== 'mjpeg')
 const showPasteText = computed(() => props.showPasteText !== false)
 const showMic = computed(() => props.showMic === true)
-const mic = getMicrophone()
 
 
 const emit = defineEmits<{
@@ -295,7 +292,10 @@ const hasRightOverflow = computed(() => {
         />
 
         <!-- Audio Config - Always visible -->
-        <AudioConfigPopover v-model:open="audioPopoverOpen" />
+        <AudioConfigPopover
+          v-model:open="audioPopoverOpen"
+          :microphone-enabled="showMic"
+        />
 
         <!-- HID Config - Always visible -->
         <HidConfigPopover
@@ -357,23 +357,6 @@ const hasRightOverflow = computed(() => {
           </Popover>
         </div>
 
-        <!-- Mic button -->
-        <div v-if="showMic">
-          <TooltipProvider>
-            <Tooltip>
-              <TooltipTrigger as-child>
-                <Button variant="ghost" size="sm" class="h-8 gap-1.5 text-xs"
-                  :class="mic.active.value ? 'text-destructive' : mic.error.value ? 'text-yellow-500' : ''"
-                  @click="mic.toggle()">
-                  <Mic class="size-4" :class="mic.active.value ? 'animate-pulse' : ''" />
-                  <span>{{ mic.active.value ? '关闭' : '麦克风' }}</span>
-                  <span v-if="mic.error.value" class="text-[10px]">{{ mic.error.value }}</span>
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>{{ mic.error.value ? mic.error.value : (mic.active.value ? '停止传声' : '开始传声') }}</TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
-        </div>
       </ButtonGroup>
 
       <!-- Right side buttons -->
