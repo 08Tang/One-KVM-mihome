@@ -184,8 +184,6 @@ export default {
   },
   paste: {
     title: 'Paste Text',
-    description: 'Enter text to send to remote host as keyboard input',
-    label: 'Text Content',
     placeholder: 'Enter text to paste here...',
     hint: 'Press Ctrl+Enter to send quickly',
     confirm: 'Send',
@@ -945,7 +943,6 @@ export default {
     fps: 'FPS',
     fpsTarget: 'Target FPS',
     fpsActual: 'Actual FPS',
-    fpsStaticHint: 'Frame rate drops automatically while the image is static',
     paused: 'Paused',
     backend: 'Backend',
     currentMode: 'Current Mode',

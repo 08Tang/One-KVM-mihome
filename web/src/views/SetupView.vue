@@ -27,7 +27,6 @@ import {
 import { Switch } from '@/components/ui/switch'
 import { Stepper, StepperItem, StepperSeparator, StepperTitle, StepperTrigger } from '@/components/ui/stepper'
 import { Alert, AlertDescription } from '@/components/ui/alert'
-import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select'
 import {
   Eye,
   EyeOff,
@@ -75,6 +74,7 @@ const platform = ref<PlatformCapabilities | null>(null)
 const isWindows = computed(() => platform.value?.mode === 'windows')
 const audioSupported = computed(() => platform.value?.audio.available ?? true)
 const totalSteps = 4
+const EMPTY_SELECT_VALUE = '__one-kvm-empty-select-value__'
 
 const hidBackend = ref('ch9329')
 const ch9329Port = ref('')
@@ -698,12 +698,20 @@ const stepIcons = [User, Video, Keyboard, Puzzle]
                   </HoverCardContent>
                 </HoverCard>
               </div>
-              <NativeSelect v-model="videoDevice" class="w-full">
-                  <NativeSelectOption value="">{{ t('setup.selectVideoDevice') }}</NativeSelectOption>
-                  <NativeSelectOption v-for="dev in devices.video" :key="dev.path" :value="dev.path">
+              <Select
+                :model-value="videoDevice"
+                @update:model-value="value => videoDevice = value === EMPTY_SELECT_VALUE ? '' : String(value)"
+              >
+                <SelectTrigger id="videoDevice" class="w-full">
+                  <SelectValue :placeholder="t('setup.selectVideoDevice')" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem :value="EMPTY_SELECT_VALUE">{{ t('setup.selectVideoDevice') }}</SelectItem>
+                  <SelectItem v-for="dev in devices.video" :key="dev.path" :value="dev.path">
                     {{ formatVideoDeviceLabel(dev) }}
-                  </NativeSelectOption>
-              </NativeSelect>
+                  </SelectItem>
+                </SelectContent>
+              </Select>
             </div>
 
             <Alert v-if="videoDevice && !selectedDeviceHasSignal" variant="warning">
@@ -731,37 +739,58 @@ const stepIcons = [User, Video, Keyboard, Puzzle]
                   </HoverCardContent>
                 </HoverCard>
               </div>
-              <NativeSelect v-model="videoFormat" class="w-full">
-                  <NativeSelectOption value="">{{ t('setup.selectFormat') }}</NativeSelectOption>
-                  <NativeSelectOption v-for="fmt in availableFormats" :key="fmt.format" :value="fmt.format">
+              <Select
+                :model-value="videoFormat"
+                @update:model-value="value => videoFormat = value === EMPTY_SELECT_VALUE ? '' : String(value)"
+              >
+                <SelectTrigger id="videoFormat" class="w-full">
+                  <SelectValue :placeholder="t('setup.selectFormat')" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem :value="EMPTY_SELECT_VALUE">{{ t('setup.selectFormat') }}</SelectItem>
+                  <SelectItem v-for="fmt in availableFormats" :key="fmt.format" :value="fmt.format">
                     {{ fmt.format }} - {{ fmt.description }}
-                  </NativeSelectOption>
-              </NativeSelect>
+                  </SelectItem>
+                </SelectContent>
+              </Select>
             </div>
 
             <div v-if="videoFormat" class="grid grid-cols-2 gap-4">
               <div class="space-y-2">
                 <Label for="videoResolution">{{ t('setup.resolution') }}</Label>
-                <NativeSelect v-model="videoResolution" class="w-full">
-                    <NativeSelectOption value="">{{ t('setup.selectResolution') }}</NativeSelectOption>
-                    <NativeSelectOption
+                <Select
+                  :model-value="videoResolution"
+                  @update:model-value="value => videoResolution = value === EMPTY_SELECT_VALUE ? '' : String(value)"
+                >
+                  <SelectTrigger id="videoResolution" class="w-full">
+                    <SelectValue :placeholder="t('setup.selectResolution')" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem :value="EMPTY_SELECT_VALUE">{{ t('setup.selectResolution') }}</SelectItem>
+                    <SelectItem
                       v-for="res in availableResolutions"
                       :key="`${res.width}x${res.height}`"
                       :value="`${res.width}x${res.height}`"
                     >
                       {{ res.width }}x{{ res.height }}
-                    </NativeSelectOption>
-                </NativeSelect>
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
 
               <div class="space-y-2">
                 <Label for="videoFps">{{ t('setup.fps') }}</Label>
-                <NativeSelect :model-value="videoFps" class="w-full" @update:model-value="value => videoFps = value === '' ? null : Number(value)">
-                    <NativeSelectOption value="">{{ t('setup.selectFps') }}</NativeSelectOption>
-                    <NativeSelectOption v-for="fps in availableFps" :key="fps" :value="fps">
+                <Select :model-value="videoFps" @update:model-value="value => videoFps = value === EMPTY_SELECT_VALUE ? null : Number(value)">
+                  <SelectTrigger id="videoFps" class="w-full">
+                    <SelectValue :placeholder="t('setup.selectFps')" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem :value="EMPTY_SELECT_VALUE">{{ t('setup.selectFps') }}</SelectItem>
+                    <SelectItem v-for="fps in availableFps" :key="fps" :value="fps">
                       {{ formatFpsLabel(fps) }}
-                    </NativeSelectOption>
-                </NativeSelect>
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
             </div>
 
@@ -784,11 +813,20 @@ const stepIcons = [User, Video, Keyboard, Puzzle]
                   </HoverCardContent>
                 </HoverCard>
               </div>
-              <NativeSelect v-model="audioDevice" class="w-full" :disabled="!audioEnabled">
-                  <NativeSelectOption value="">{{ t('setup.selectAudioDevice') }}</NativeSelectOption>
-                  <NativeSelectOption value="__none__">{{ t('setup.noAudio') }}</NativeSelectOption>
-                  <NativeSelectOption v-for="dev in devices.audio" :key="dev.name" :value="dev.name">{{ dev.description }}{{ dev.is_hdmi ? ' (HDMI)' : '' }}</NativeSelectOption>
-              </NativeSelect>
+              <Select
+                :model-value="audioDevice"
+                :disabled="!audioEnabled"
+                @update:model-value="value => audioDevice = value === EMPTY_SELECT_VALUE ? '' : String(value)"
+              >
+                <SelectTrigger id="audioDevice" class="w-full">
+                  <SelectValue :placeholder="t('setup.selectAudioDevice')" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem :value="EMPTY_SELECT_VALUE">{{ t('setup.selectAudioDevice') }}</SelectItem>
+                  <SelectItem value="__none__">{{ t('setup.noAudio') }}</SelectItem>
+                  <SelectItem v-for="dev in devices.audio" :key="dev.name" :value="dev.name">{{ dev.description }}{{ dev.is_hdmi ? ' (HDMI)' : '' }}</SelectItem>
+                </SelectContent>
+              </Select>
               <p v-if="!devices.audio.length" class="text-xs text-muted-foreground">
                 {{ t('setup.noAudioDevices') }}
               </p>
@@ -859,12 +897,20 @@ const stepIcons = [User, Video, Keyboard, Puzzle]
 
               <div class="space-y-2">
                 <Label for="ch9329Port">{{ t('setup.serialPort') }}</Label>
-                <NativeSelect v-model="ch9329Port" class="w-full">
-                    <NativeSelectOption value="">{{ t('setup.selectSerialPort') }}</NativeSelectOption>
-                    <NativeSelectOption v-for="port in devices.serial" :key="port.path" :value="port.path">
+                <Select
+                  :model-value="ch9329Port"
+                  @update:model-value="value => ch9329Port = value === EMPTY_SELECT_VALUE ? '' : String(value)"
+                >
+                  <SelectTrigger id="ch9329Port" class="w-full">
+                    <SelectValue :placeholder="t('setup.selectSerialPort')" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem :value="EMPTY_SELECT_VALUE">{{ t('setup.selectSerialPort') }}</SelectItem>
+                    <SelectItem v-for="port in devices.serial" :key="port.path" :value="port.path">
                       {{ port.name }} ({{ port.path }})
-                    </NativeSelectOption>
-                </NativeSelect>
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
                 <p v-if="!devices.serial.length" class="text-xs text-muted-foreground">
                   {{ t('setup.noSerialDevices') }}
                 </p>
@@ -894,12 +940,20 @@ const stepIcons = [User, Video, Keyboard, Puzzle]
 
               <div class="space-y-2">
                 <Label for="otgUdc">{{ t('setup.udc') }}</Label>
-                <NativeSelect v-model="otgUdc" class="w-full">
-                    <NativeSelectOption value="">{{ t('setup.selectUdc') }}</NativeSelectOption>
-                    <NativeSelectOption v-for="udc in devices.udc" :key="udc.name" :value="udc.name">
+                <Select
+                  :model-value="otgUdc"
+                  @update:model-value="value => otgUdc = value === EMPTY_SELECT_VALUE ? '' : String(value)"
+                >
+                  <SelectTrigger id="otgUdc" class="w-full">
+                    <SelectValue :placeholder="t('setup.selectUdc')" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem :value="EMPTY_SELECT_VALUE">{{ t('setup.selectUdc') }}</SelectItem>
+                    <SelectItem v-for="udc in devices.udc" :key="udc.name" :value="udc.name">
                       {{ udc.name }}
-                    </NativeSelectOption>
-                </NativeSelect>
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
                 <p v-if="!devices.udc.length" class="text-xs text-muted-foreground">
                   {{ t('setup.noUdcDevices') }}
                 </p>

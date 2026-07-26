@@ -7,7 +7,7 @@ import { Loader2, RefreshCw, Volume2 } from 'lucide-vue-next'
 import { audioApi, configApi } from '@/api'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
-import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import {
   Popover,
   PopoverContent,
@@ -48,6 +48,7 @@ const applying = ref(false)
 const audioEnabled = ref(false)
 const selectedDevice = ref('')
 const selectedQuality = ref<'voice' | 'balanced' | 'high'>('balanced')
+const EMPTY_SELECT_VALUE = '__one-kvm-empty-select-value__'
 
 async function handleVolumeChange(value: number[] | undefined) {
   if (!value || value.length === 0 || value[0] === undefined) return
@@ -226,23 +227,26 @@ onUnmounted(() => {
 
           <div class="space-y-2">
             <Label class="text-xs text-muted-foreground">{{ t('actionbar.audioDevice') }}</Label>
-            <NativeSelect
+            <Select
               :model-value="selectedDevice"
               :disabled="loadingDevices || devices.length === 0"
-              size="sm"
-              class="w-full text-xs"
-              @update:model-value="selectedDevice = $event as string"
+              @update:model-value="selectedDevice = $event === EMPTY_SELECT_VALUE ? '' : String($event)"
             >
-              <NativeSelectOption value="">{{ t('actionbar.selectAudioDevice') }}</NativeSelectOption>
-              <NativeSelectOption
-                v-for="device in devices"
-                :key="device.name"
-                :value="device.name"
-                class="text-xs"
-              >
-                {{ device.description || device.name }}
-              </NativeSelectOption>
-            </NativeSelect>
+              <SelectTrigger size="sm" class="w-full text-xs">
+                <SelectValue :placeholder="t('actionbar.selectAudioDevice')" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem :value="EMPTY_SELECT_VALUE" class="text-xs">{{ t('actionbar.selectAudioDevice') }}</SelectItem>
+                <SelectItem
+                  v-for="device in devices"
+                  :key="device.name"
+                  :value="device.name"
+                  class="text-xs"
+                >
+                  {{ device.description || device.name }}
+                </SelectItem>
+              </SelectContent>
+            </Select>
           </div>
 
           <div class="space-y-2">

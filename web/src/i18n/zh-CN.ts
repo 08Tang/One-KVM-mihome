@@ -184,8 +184,6 @@ export default {
   },
   paste: {
     title: '粘贴文本',
-    description: '输入要发送到远程主机的文本，将以键盘输入方式发送',
-    label: '文本内容',
     placeholder: '在此输入要粘贴的文本...',
     hint: '按 Ctrl+Enter 快速发送',
     confirm: '发送',
@@ -944,7 +942,6 @@ export default {
     fps: '帧率',
     fpsTarget: '目标帧率',
     fpsActual: '实际帧率',
-    fpsStaticHint: '画面静止时会自动降帧',
     paused: '已暂停',
     backend: '后端',
     currentMode: '当前模式',

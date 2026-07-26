@@ -5,7 +5,7 @@ import { toast } from 'vue-sonner'
 import { Loader2, Mic, MicOff, RefreshCw } from 'lucide-vue-next'
 
 import { Button } from '@/components/ui/button'
-import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { getMicrophone } from '@/composables/useMicrophone'
 
 const { t } = useI18n()
@@ -69,25 +69,25 @@ async function selectDevice(value: unknown) {
     </Button>
 
     <div v-else>
-      <NativeSelect
+      <Select
         :model-value="microphone.selectedDeviceId.value"
         :disabled="microphone.loadingDevices.value || microphone.busy.value || microphone.inputDevices.value.length === 0"
-        size="sm"
-        class="w-full text-xs"
         @update:model-value="selectDevice"
       >
-        <NativeSelectOption v-if="microphone.inputDevices.value.length === 0" value="">
-          {{ t('actionbar.noMicrophoneDevices') }}
-        </NativeSelectOption>
-        <NativeSelectOption
-          v-for="device in microphone.inputDevices.value"
-          :key="device.deviceId"
-          :value="device.deviceId"
-          class="text-xs"
-        >
-          {{ device.label }}
-        </NativeSelectOption>
-      </NativeSelect>
+        <SelectTrigger size="sm" class="w-full text-xs">
+          <SelectValue :placeholder="t('actionbar.noMicrophoneDevices')" />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem
+            v-for="device in microphone.inputDevices.value"
+            :key="device.deviceId"
+            :value="device.deviceId"
+            class="text-xs"
+          >
+            {{ device.label }}
+          </SelectItem>
+        </SelectContent>
+      </Select>
     </div>
 
     <Button

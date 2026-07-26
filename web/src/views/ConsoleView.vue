@@ -308,13 +308,6 @@ const videoDetails = computed<StatusDetail[]>(() => {
     { label: t('statusCard.fpsActual'), value: actualFpsValue, status: actualStatus },
   ]
 
-  if (videoMode.value === 'mjpeg' && !paused && receivedFps > 0 && receivedFps < (stream.targetFps ?? 0)) {
-    details.push({
-      label: '',
-      value: t('statusCard.fpsStaticHint'),
-    })
-  }
-
   return details
 })
 
