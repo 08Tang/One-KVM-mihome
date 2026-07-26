@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io;
 use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 use tracing::{debug, info, warn};
@@ -70,6 +70,8 @@ pub struct CaptureStream {
     mappings: Vec<Vec<PlaneMapping>>,
     subdev_fd: Option<File>,
     bridge_kind: Option<CsiBridgeKind>,
+    native_hdmirx_state: Option<NativeHdmirxState>,
+    native_hdmirx_next_state_check: Option<Instant>,
 }
 
 impl CaptureStream {
@@ -154,6 +156,7 @@ impl CaptureStream {
         let caps_flags = caps.device_caps();
         let driver_name = caps.driver.to_string();
         let is_csi_bridge = is_csi_bridge_driver(&driver_name);
+        let is_native_hdmirx = is_native_hdmirx_driver(&driver_name);
 
         // Prefer multi-planar capture when available, as it is required for some
         // devices/pixel formats (e.g. NV12 via VIDEO_CAPTURE_MPLANE).
@@ -176,9 +179,14 @@ impl CaptureStream {
                 width: mode.width,
                 height: mode.height,
                 fps: mode.fps,
+                signature: None,
             })
         } else if is_csi_bridge {
-            Some(probe_and_apply_dv_timings(&fd)?)
+            // The native RK3588 HDMI RX driver already latches detected
+            // timings while locking the input.  S_DV_TIMINGS is unnecessary
+            // there and rejects some otherwise valid sources whose measured
+            // porches do not exactly match its CEA table.
+            Some(probe_dv_timings(&fd, !is_native_hdmirx)?)
         } else {
             None
         };
@@ -208,19 +216,51 @@ impl CaptureStream {
         // Prefer the DV-timings-reported geometry for CSI bridges — the
         // source, not the user config, dictates what the capture hardware
         // will actually deliver.
-        let (target_w, target_h) = match dv_mode {
-            Some(DvTimingsMode { width, height, .. }) => (width, height),
+        let (target_w, target_h) = match dv_mode.as_ref() {
+            Some(DvTimingsMode { width, height, .. }) => (*width, *height),
             None => (resolution.width, resolution.height),
         };
         fmt.width = target_w;
         fmt.height = target_h;
-        fmt.pixelformat = V4l2rPixelFormat::from(&format.to_fourcc());
+        let requested_fourcc = V4l2rPixelFormat::from(&format.to_fourcc());
+        if is_native_hdmirx && fmt.pixelformat != requested_fourcc {
+            // rk_hdmirx exposes all possible HDMI input encodings through
+            // ENUM_FMT but can capture only the encoding currently present on
+            // the wire.  Follow G_FMT so a source-side RGB/YUV transition can
+            // recover even if the saved configuration still names the old
+            // FourCC.  The negotiated format is returned to the caller, which
+            // rebuilds the encoder when it changed.
+            info!(
+                "rk_hdmirx input format changed/requested {:?}, following active {:?}",
+                requested_fourcc, fmt.pixelformat
+            );
+        } else {
+            fmt.pixelformat = requested_fourcc;
+        }
 
         let actual_fmt: V4l2rFormat = ioctl::s_fmt(&mut fd, (queue, &fmt))
             .map_err(|e| AppError::VideoError(format!("Failed to set device format: {}", e)))?;
 
         let actual_resolution = Resolution::new(actual_fmt.width, actual_fmt.height);
-        let actual_format = PixelFormat::from_v4l2r(actual_fmt.pixelformat).unwrap_or(format);
+        let actual_format = match PixelFormat::from_v4l2r(actual_fmt.pixelformat) {
+            Some(format) => format,
+            None if is_native_hdmirx => {
+                return Err(AppError::VideoError(format!(
+                    "Native HDMI RX input format {:?} is not supported; configure the HDMI source for 8-bit RGB/YUV output",
+                    actual_fmt.pixelformat
+                )));
+            }
+            None => format,
+        };
+
+        let native_hdmirx_state = is_native_hdmirx.then(|| NativeHdmirxState {
+            width: actual_fmt.width,
+            height: actual_fmt.height,
+            pixelformat: actual_fmt.pixelformat,
+            timings: dv_mode.as_ref().and_then(|mode| mode.signature),
+        });
+        let native_hdmirx_next_state_check =
+            native_hdmirx_state.map(|_| Instant::now() + Duration::from_secs(1));
 
         let stride = actual_fmt
             .plane_fmt
@@ -288,6 +328,8 @@ impl CaptureStream {
             mappings,
             subdev_fd: subdev_fd_opt,
             bridge_kind: bridge.kind,
+            native_hdmirx_state,
+            native_hdmirx_next_state_check,
         };
 
         stream.queue_all_buffers()?;
@@ -376,6 +418,24 @@ impl CaptureStream {
     pub fn next_into(&mut self, dst: &mut Vec<u8>) -> io::Result<CaptureMeta> {
         self.wait_ready()?;
 
+        // Several vendor BSPs update G_FMT/DV timings without making the
+        // subscribed video fd poll as POLLPRI.  Check once per second so a
+        // genuine source mode change cannot leave us dequeuing buffers with
+        // stale geometry forever.  Transient ioctl failures are ignored here;
+        // the capture timeout/error path remains responsible for recovery.
+        if self
+            .native_hdmirx_next_state_check
+            .is_some_and(|next| Instant::now() >= next)
+        {
+            self.native_hdmirx_next_state_check = Some(Instant::now() + Duration::from_secs(1));
+            if self.native_hdmirx_state_changed() {
+                info!(
+                    "Native HDMI RX active format/timings changed without a usable event; requesting stream re-open"
+                );
+                return Err(io::Error::other(SOURCE_CHANGED_MARKER));
+            }
+        }
+
         let dqbuf: V4l2Buffer = ioctl::dqbuf(&self.fd, self.queue, MemoryType::Mmap)
             .map_err(|e| io::Error::other(format!("dqbuf failed: {}", e)))?;
         let index = dqbuf.as_v4l2_buffer().index as usize;
@@ -441,76 +501,142 @@ impl CaptureStream {
         if self.timeout.is_zero() {
             return Ok(());
         }
-        // Multiplex video fd (POLLIN for DQBUF, POLLPRI as fallback for
-        // drivers that deliver events here) and the optional subdev fd
-        // (POLLPRI only — SOURCE_CHANGE on RK628 / rkcif).
-        let mut poll_fds: Vec<PollFd> = Vec::with_capacity(2);
-        poll_fds.push(PollFd::new(
-            self.fd.as_fd(),
-            PollFlags::POLLIN | PollFlags::POLLPRI | PollFlags::POLLERR | PollFlags::POLLHUP,
-        ));
-        if let Some(subdev_fd) = self.subdev_fd.as_ref() {
-            poll_fds.push(PollFd::new(subdev_fd.as_fd(), PollFlags::POLLPRI));
-        }
-        let timeout_ms = self.timeout.as_millis().min(u16::MAX as u128) as u16;
-        let ready = poll(&mut poll_fds, PollTimeout::from(timeout_ms))?;
-        if ready == 0 {
-            return Err(io::Error::new(io::ErrorKind::TimedOut, "capture timeout"));
-        }
+        let deadline = Instant::now() + self.timeout;
+        loop {
+            // Multiplex video fd (POLLIN for DQBUF, POLLPRI as fallback for
+            // drivers that deliver events here) and the optional subdev fd
+            // (POLLPRI only — SOURCE_CHANGE on RK628 / rkcif).
+            let mut poll_fds: Vec<PollFd> = Vec::with_capacity(2);
+            poll_fds.push(PollFd::new(
+                self.fd.as_fd(),
+                PollFlags::POLLIN | PollFlags::POLLPRI | PollFlags::POLLERR | PollFlags::POLLHUP,
+            ));
+            if let Some(subdev_fd) = self.subdev_fd.as_ref() {
+                poll_fds.push(PollFd::new(subdev_fd.as_fd(), PollFlags::POLLPRI));
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "capture timeout"));
+            }
+            // `nix::poll` accepts a u16 millisecond timeout. Round sub-ms
+            // durations up, and preserve the original deadline if a very long
+            // timeout needs more than one poll call.
+            let timeout_ms = remaining.as_millis().clamp(1, u16::MAX as u128) as u16;
+            let ready = poll(&mut poll_fds, PollTimeout::from(timeout_ms))?;
+            if ready == 0 {
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "capture timeout"));
+                }
+                continue;
+            }
 
-        // Subdev POLLPRI fires first on rkcif/RK628 when the source-side
-        // HDMI timings changed.  Drain all pending events and bubble up
-        // the `source_changed` marker so the upper layer re-opens with a
-        // fresh DV_TIMINGS probe.
-        if let Some(subdev_fd) = self.subdev_fd.as_ref() {
-            if let Some(revents) = poll_fds.get(1).and_then(|f| f.revents()) {
+            // Subdev POLLPRI fires first on rkcif/RK628 when the source-side
+            // HDMI timings changed.  Native HDMI RX uses the video node and
+            // is validated separately below.
+            if let Some(subdev_fd) = self.subdev_fd.as_ref() {
+                if let Some(revents) = poll_fds.get(1).and_then(|f| f.revents()) {
+                    if revents.contains(PollFlags::POLLPRI) {
+                        let drained = drain_events(subdev_fd);
+                        info!(
+                            "Subdev SOURCE_CHANGE detected (drained {} event(s)), \
+                             requesting stream re-open",
+                            drained
+                        );
+                        return Err(io::Error::other(SOURCE_CHANGED_MARKER));
+                    }
+                }
+            }
+
+            if let Some(revents) = poll_fds[0].revents() {
+                if revents.contains(PollFlags::POLLERR) || revents.contains(PollFlags::POLLHUP) {
+                    debug!(
+                        "capture poll: video revents={:?} (ERR/HUP) — requesting stream re-open",
+                        revents
+                    );
+                    return Err(io::Error::other(SOURCE_CHANGED_MARKER));
+                }
                 if revents.contains(PollFlags::POLLPRI) {
-                    let drained = drain_events(subdev_fd);
+                    let drained = drain_events(&self.fd);
+                    if self.native_hdmirx_state_unchanged() {
+                        debug!(
+                            "Ignoring {} spurious native HDMI RX SOURCE_CHANGE event(s): active format/timings are unchanged",
+                            drained
+                        );
+                        if revents.contains(PollFlags::POLLIN) {
+                            return Ok(());
+                        }
+                        continue;
+                    }
                     info!(
-                        "Subdev SOURCE_CHANGE detected (drained {} event(s)), \
+                        "Video-node SOURCE_CHANGE detected (drained {} event(s)), \
                          requesting stream re-open",
                         drained
                     );
                     return Err(io::Error::other(SOURCE_CHANGED_MARKER));
                 }
+                if !revents.contains(PollFlags::POLLIN) {
+                    // rkcif + RK628: the driver may wake `poll` after internally
+                    // invalidating queued buffers without queueing a V4L2 event.
+                    // Treat like SOURCE_CHANGE so we STREAMOFF / re-S_FMT.
+                    debug!(
+                        "capture poll: ready={} video revents={:?} (no POLLIN) — requesting stream re-open",
+                        ready, revents
+                    );
+                    return Err(io::Error::other(SOURCE_CHANGED_MARKER));
+                }
+                return Ok(());
             }
+
+            debug!(
+                "capture poll: ready={} but video revents unavailable — requesting stream re-open",
+                ready
+            );
+            return Err(io::Error::other(SOURCE_CHANGED_MARKER));
+        }
+    }
+
+    fn native_hdmirx_state_unchanged(&self) -> bool {
+        let Some(expected) = self.native_hdmirx_state.as_ref() else {
+            return false;
+        };
+        let Ok(current_fmt) = ioctl::g_fmt::<V4l2rFormat>(&self.fd, self.queue) else {
+            return false;
+        };
+        if !expected.format_matches(
+            current_fmt.width,
+            current_fmt.height,
+            current_fmt.pixelformat,
+        ) {
+            return false;
         }
 
-        if let Some(revents) = poll_fds[0].revents() {
-            if revents.contains(PollFlags::POLLERR) || revents.contains(PollFlags::POLLHUP) {
-                debug!(
-                    "capture poll: video revents={:?} (ERR/HUP) — requesting stream re-open",
-                    revents
-                );
-                return Err(io::Error::other(SOURCE_CHANGED_MARKER));
-            }
-            if revents.contains(PollFlags::POLLPRI) {
-                let drained = drain_events(&self.fd);
-                info!(
-                    "Video-node SOURCE_CHANGE detected (drained {} event(s)), \
-                     requesting stream re-open",
-                    drained
-                );
-                return Err(io::Error::other(SOURCE_CHANGED_MARKER));
-            }
-            if !revents.contains(PollFlags::POLLIN) {
-                // rkcif + RK628: the driver may wake `poll` after internally
-                // invalidating queued buffers without queueing a V4L2 event.
-                // Treat like SOURCE_CHANGE so we STREAMOFF / re-S_FMT.
-                debug!(
-                    "capture poll: ready={} video revents={:?} (no POLLIN) — requesting stream re-open",
-                    ready, revents
-                );
-                return Err(io::Error::other(SOURCE_CHANGED_MARKER));
-            }
-            return Ok(());
+        let observed_timings = ioctl::query_dv_timings::<v4l2_dv_timings>(&self.fd)
+            .ok()
+            .and_then(|timings| dv_timings_signature(&timings));
+        expected.timings_match(observed_timings).unwrap_or(false)
+    }
+
+    fn native_hdmirx_state_changed(&self) -> bool {
+        let Some(expected) = self.native_hdmirx_state.as_ref() else {
+            return false;
+        };
+        let Ok(current_fmt) = ioctl::g_fmt::<V4l2rFormat>(&self.fd, self.queue) else {
+            return false;
+        };
+        if !expected.format_matches(
+            current_fmt.width,
+            current_fmt.height,
+            current_fmt.pixelformat,
+        ) {
+            return true;
         }
 
-        debug!(
-            "capture poll: ready={} but video revents unavailable — requesting stream re-open",
-            ready
-        );
-        Err(io::Error::other(SOURCE_CHANGED_MARKER))
+        let observed_timings = ioctl::query_dv_timings::<v4l2_dv_timings>(&self.fd)
+            .ok()
+            .and_then(|timings| dv_timings_signature(&timings));
+        expected
+            .timings_match(observed_timings)
+            .is_some_and(|matches| !matches)
     }
 
     fn queue_all_buffers(&mut self) -> Result<()> {
@@ -576,7 +702,11 @@ impl Drop for CaptureStream {
 /// `VideoDeviceInfo` at `CaptureStream::open` time.
 fn is_csi_bridge_driver(driver: &str) -> bool {
     let d = driver.to_ascii_lowercase();
-    d == "rk_hdmirx" || d == "rkcif" || d == "tc358743" || d.starts_with("rkcif")
+    is_native_hdmirx_driver(&d) || d == "rkcif" || d == "tc358743" || d.starts_with("rkcif")
+}
+
+fn is_native_hdmirx_driver(driver: &str) -> bool {
+    driver.eq_ignore_ascii_case("rk_hdmirx") || driver.eq_ignore_ascii_case("snps_hdmirx")
 }
 
 /// Drain any pending `V4L2_EVENT_*` events on `fd`.  Used after POLLPRI to
@@ -602,6 +732,94 @@ struct DvTimingsMode {
     height: u32,
     #[allow(dead_code)]
     fps: Option<f64>,
+    signature: Option<DvTimingsSignature>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NativeHdmirxState {
+    width: u32,
+    height: u32,
+    pixelformat: V4l2rPixelFormat,
+    timings: Option<DvTimingsSignature>,
+}
+
+impl NativeHdmirxState {
+    fn format_matches(self, width: u32, height: u32, pixelformat: V4l2rPixelFormat) -> bool {
+        self.width == width && self.height == height && self.pixelformat == pixelformat
+    }
+
+    /// `None` means the expected state contains timings but the current
+    /// timings could not be observed. Event handling treats that uncertainty
+    /// conservatively as changed; periodic fallback probing ignores it so a
+    /// single transient ioctl failure cannot tear down a healthy stream.
+    fn timings_match(self, observed: Option<DvTimingsSignature>) -> Option<bool> {
+        match (self.timings, observed) {
+            (None, _) => Some(true),
+            (Some(expected), Some(current)) => Some(current.matches(expected)),
+            (Some(_), None) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DvTimingsSignature {
+    width: u32,
+    height: u32,
+    total_width: u32,
+    total_height: u32,
+    pixelclock: u64,
+    interlaced: bool,
+}
+
+impl DvTimingsSignature {
+    fn matches(self, other: Self) -> bool {
+        let self_total = u128::from(self.total_width) * u128::from(self.total_height);
+        let other_total = u128::from(other.total_width) * u128::from(other.total_height);
+        // RK3588 BSPs can describe the same active mode with different
+        // blanking/pixel-clock pairs (observed for 1080p60: 2200×1125 at
+        // 148.5 MHz and 2752×1125 at 185.448 MHz). Compare the resulting
+        // frame rates by cross multiplication instead of requiring identical
+        // totals. A 0.5% tolerance absorbs measurement jitter and 59.94/60,
+        // while still distinguishing normal 50/60 transitions.
+        let self_rate = u128::from(self.pixelclock) * other_total;
+        let other_rate = u128::from(other.pixelclock) * self_total;
+        let rate_delta = self_rate.abs_diff(other_rate);
+        let rate_tolerance = (self_rate.max(other_rate) / 200).max(1);
+        self.width == other.width
+            && self.height == other.height
+            && self.interlaced == other.interlaced
+            && self.pixelclock != 0
+            && other.pixelclock != 0
+            && self_total != 0
+            && other_total != 0
+            && rate_delta <= rate_tolerance
+    }
+}
+
+fn dv_timings_signature(timings: &v4l2_dv_timings) -> Option<DvTimingsSignature> {
+    let timings_type = timings.type_;
+    if timings_type != V4L2_DV_BT_656_1120 {
+        return None;
+    }
+    let bt = unsafe { timings.__bindgen_anon_1.bt };
+    let width = bt.width;
+    let height = bt.height;
+    let total_width = width
+        .checked_add(bt.hfrontporch)?
+        .checked_add(bt.hsync)?
+        .checked_add(bt.hbackporch)?;
+    let total_height = height
+        .checked_add(bt.vfrontporch)?
+        .checked_add(bt.vsync)?
+        .checked_add(bt.vbackporch)?;
+    Some(DvTimingsSignature {
+        width,
+        height,
+        total_width,
+        total_height,
+        pixelclock: bt.pixelclock,
+        interlaced: bt.interlaced != 0,
+    })
 }
 
 /// Probe DV timings from the source and latch them into the driver.
@@ -619,7 +837,7 @@ struct DvTimingsMode {
 ///   * `ENODATA`    → `NoSignal` (driver says "no DV timings support on
 ///                                this input", e.g. EDID not applied yet)
 ///   * anything else → `NoSignal` (fallback, keeps the retry loop going)
-fn probe_and_apply_dv_timings(fd: &File) -> Result<DvTimingsMode> {
+fn probe_dv_timings(fd: &File, apply: bool) -> Result<DvTimingsMode> {
     let timings: v4l2_dv_timings = match ioctl::query_dv_timings(fd) {
         Ok(t) => t,
         Err(err) => {
@@ -687,11 +905,13 @@ fn probe_and_apply_dv_timings(fd: &File) -> Result<DvTimingsMode> {
     // right pixel clock + blanking.  Failure here is *not* fatal on some
     // drivers (rkcif doesn't implement S_DV_TIMINGS per-output-device, only
     // on the bridging subdev), so degrade to a warning and keep going.
-    if let Err(e) = ioctl::s_dv_timings::<_, v4l2_dv_timings>(fd, timings) {
-        debug!(
-            "VIDIOC_S_DV_TIMINGS failed ({}), continuing with queried timings for S_FMT",
-            e
-        );
+    if apply {
+        if let Err(e) = ioctl::s_dv_timings::<_, v4l2_dv_timings>(fd, timings) {
+            debug!(
+                "VIDIOC_S_DV_TIMINGS failed ({}), continuing with queried timings for S_FMT",
+                e
+            );
+        }
     }
 
     let fps = dv_timings_fps_from_scalars(
@@ -714,6 +934,7 @@ fn probe_and_apply_dv_timings(fd: &File) -> Result<DvTimingsMode> {
         width: bt_width,
         height: bt_height,
         fps,
+        signature: dv_timings_signature(&timings),
     })
 }
 
@@ -748,4 +969,70 @@ fn set_fps(fd: &File, queue: QueueType, fps: u32) -> std::result::Result<(), ioc
 
     let _actual: v4l2_streamparm = ioctl::s_parm(fd, params)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_native_hdmirx_driver, DvTimingsSignature, NativeHdmirxState};
+    use crate::video::format::PixelFormat;
+
+    fn timing(pixelclock: u64) -> DvTimingsSignature {
+        DvTimingsSignature {
+            width: 1920,
+            height: 1080,
+            total_width: 2200,
+            total_height: 1125,
+            pixelclock,
+            interlaced: false,
+        }
+    }
+
+    #[test]
+    fn recognizes_vendor_and_upstream_native_hdmirx_drivers() {
+        assert!(is_native_hdmirx_driver("rk_hdmirx"));
+        assert!(is_native_hdmirx_driver("SNPS_HDMIRX"));
+        assert!(!is_native_hdmirx_driver("rkcif"));
+    }
+
+    #[test]
+    fn timing_match_tolerates_measurement_jitter_but_not_mode_changes() {
+        assert!(timing(148_500_000).matches(timing(148_000_000)));
+        assert!(!timing(148_500_000).matches(timing(120_000_000)));
+
+        let mut equivalent_blanking = timing(185_448_000);
+        equivalent_blanking.total_width = 2752;
+        assert!(timing(148_500_000).matches(equivalent_blanking));
+
+        let mut different_refresh = timing(148_500_000);
+        different_refresh.total_width = 2640;
+        assert!(!timing(148_500_000).matches(different_refresh));
+
+        let mut interlaced = timing(148_500_000);
+        interlaced.interlaced = true;
+        assert!(!timing(148_500_000).matches(interlaced));
+    }
+
+    #[test]
+    fn native_hdmirx_state_distinguishes_spurious_and_real_changes() {
+        let bgr24 = PixelFormat::Bgr24.to_v4l2r();
+        let state = NativeHdmirxState {
+            width: 1920,
+            height: 1080,
+            pixelformat: bgr24,
+            timings: Some(timing(148_500_000)),
+        };
+
+        assert!(state.format_matches(1920, 1080, bgr24));
+        assert!(!state.format_matches(1280, 720, bgr24));
+        assert!(!state.format_matches(1920, 1080, PixelFormat::Nv12.to_v4l2r()));
+        assert_eq!(state.timings_match(Some(timing(148_000_000))), Some(true));
+        assert_eq!(state.timings_match(Some(timing(120_000_000))), Some(false));
+        assert_eq!(state.timings_match(None), None);
+
+        let no_timing_state = NativeHdmirxState {
+            timings: None,
+            ..state
+        };
+        assert_eq!(no_timing_state.timings_match(None), Some(true));
+    }
 }

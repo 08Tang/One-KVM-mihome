@@ -20,7 +20,9 @@ pub mod bridge;
 pub mod bridge;
 
 pub(crate) fn is_rk_hdmirx_driver(driver: &str, card: &str) -> bool {
-    driver.eq_ignore_ascii_case("rk_hdmirx") || card.eq_ignore_ascii_case("rk_hdmirx")
+    [driver, card].iter().any(|name| {
+        name.eq_ignore_ascii_case("rk_hdmirx") || name.eq_ignore_ascii_case("snps_hdmirx")
+    })
 }
 
 pub(crate) fn is_rk_hdmirx_device(device: &VideoDeviceInfo) -> bool {
@@ -35,6 +37,19 @@ pub(crate) fn is_rkcif_driver(driver: &str) -> bool {
 /// that require special enumeration and format-selection logic.
 pub(crate) fn is_csi_hdmi_bridge(device: &VideoDeviceInfo) -> bool {
     is_rk_hdmirx_device(device) || is_rkcif_driver(&device.driver)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_rk_hdmirx_driver;
+
+    #[test]
+    fn recognizes_vendor_and_upstream_native_hdmirx_names() {
+        assert!(is_rk_hdmirx_driver("rk_hdmirx", "rk_hdmirx"));
+        assert!(is_rk_hdmirx_driver("snps_hdmirx", "Synopsys HDMI RX"));
+        assert!(is_rk_hdmirx_driver("other", "SNPS_HDMIRX"));
+        assert!(!is_rk_hdmirx_driver("rkcif", "stream_cif_mipi_id0"));
+    }
 }
 
 #[cfg(unix)]

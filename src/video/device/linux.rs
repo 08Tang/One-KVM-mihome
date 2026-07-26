@@ -267,20 +267,20 @@ impl VideoDevice {
             (true, None)
         };
 
-        let mut formats =
-            if is_rk_hdmirx_driver(&caps.driver, &caps.card) || is_rkcif_driver(&caps.driver) {
-                // CSI/HDMI bridge drivers (rk_hdmirx, rkcif) expose multiple pixel
-                // formats via ENUM_FMT (e.g. rk_hdmirx: BGR3/NV24/NV16/NV12) but
-                // `ENUM_FRAMESIZES` is fiction for these drivers (rkcif reports a
-                // degenerate `64x64 StepWise 8/8` that only describes its DMA
-                // engine, rk_hdmirx returns ENOTTY). The only authoritative
-                // resolution is whatever the bridge subdev's DV timings report,
-                // so we treat the HDMI source mode as the single allowed
-                // resolution for every pixel format.
-                self.enumerate_bridge_formats(subdev_hdmi_mode)?
-            } else {
-                self.enumerate_formats()?
-            };
+        let native_hdmirx = is_rk_hdmirx_driver(&caps.driver, &caps.card);
+        let mut formats = if native_hdmirx || is_rkcif_driver(&caps.driver) {
+            // CSI/HDMI bridge drivers (rk_hdmirx, rkcif) expose multiple pixel
+            // formats via ENUM_FMT (e.g. rk_hdmirx: BGR3/NV24/NV16/NV12) but
+            // `ENUM_FRAMESIZES` is fiction for these drivers (rkcif reports a
+            // degenerate `64x64 StepWise 8/8` that only describes its DMA
+            // engine, rk_hdmirx returns ENOTTY). The only authoritative
+            // resolution is whatever the bridge subdev's DV timings report,
+            // so we treat the HDMI source mode as the single allowed
+            // resolution for every pixel format.
+            self.enumerate_bridge_formats(subdev_hdmi_mode, native_hdmirx)?
+        } else {
+            self.enumerate_formats()?
+        };
 
         // For CSI/HDMI bridges, the driver-enumerated fps list is fiction
         // (rkcif: always `1..30`; rk_hdmirx: typically `ENOTTY`).  Replace
@@ -373,12 +373,13 @@ impl VideoDevice {
     /// HDMI source mode.
     ///
     /// Returned formats are sorted by `PixelFormat::priority()` so the
-    /// higher-level `select_format` picks a sensible default (NV12 > YUYV on
-    /// rkcif / rk_hdmirx) instead of whatever the driver happens to
-    /// have stuck as the current active format.
+    /// higher-level `select_format` picks a sensible default for conversion-
+    /// capable rkcif paths. Native HDMI RX is reduced to its single current
+    /// wire format before sorting.
     fn enumerate_bridge_formats(
         &self,
         subdev_hdmi_mode: Option<(u32, u32, Option<f64>)>,
+        current_format_only: bool,
     ) -> Result<Vec<FormatInfo>> {
         let queue = self.capture_queue_type()?;
         let current_fmt = self.get_format().ok();
@@ -431,6 +432,31 @@ impl VideoDevice {
                 );
                 continue;
             };
+
+            // Native RK3588 HDMI RX does not perform pixel-format conversion.
+            // ENUM_FMT reports every input encoding the controller can receive,
+            // but TRY_FMT/S_FMT accept only the FourCC corresponding to the
+            // source's current AVI InfoFrame (RGB -> BGR3, YUV444 -> NV24,
+            // YUV422 -> NV16, YUV420 -> NV12).  Advertising the full ENUM_FMT
+            // list makes the higher layer prefer NV12 even for an RGB source,
+            // and capture then fails with EINVAL.  G_FMT is the driver's
+            // authoritative current-input format.
+            if current_format_only {
+                let Some(active) = current_fmt.as_ref() else {
+                    debug!(
+                        "enumerate_bridge_formats: skipping native HDMI RX format {:?} because G_FMT is unavailable",
+                        desc.pixelformat
+                    );
+                    continue;
+                };
+                if active.pixelformat != desc.pixelformat {
+                    debug!(
+                        "enumerate_bridge_formats: skipping inactive rk_hdmirx format {:?}; current is {:?}",
+                        desc.pixelformat, active.pixelformat
+                    );
+                    continue;
+                }
+            }
 
             let resolutions = hdmi_mode.clone().into_iter().collect();
 
@@ -685,6 +711,7 @@ impl VideoDevice {
             "uvc",
             "rkcif",
             "rk_hdmirx",
+            "snps_hdmirx",
         ];
 
         // Check card/driver names
@@ -1158,6 +1185,7 @@ fn sysfs_maybe_capture(path: &Path) -> bool {
         "grabber",
         "rkcif",
         "rk_hdmirx",
+        "snps_hdmirx",
     ];
     if capture_hints.iter().any(|hint| sysfs_name.contains(hint)) {
         maybe_capture = true;
@@ -1167,6 +1195,7 @@ fn sysfs_maybe_capture(path: &Path) -> bool {
             || driver.contains("tc358743")
             || driver.contains("rkcif")
             || driver.contains("rk_hdmirx")
+            || driver.contains("snps_hdmirx")
         {
             maybe_capture = true;
         }

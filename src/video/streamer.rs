@@ -616,6 +616,17 @@ impl Streamer {
             return Ok(());
         }
 
+        // A no-signal/source-change recovery keeps the existing capture thread
+        // alive while it closes and re-opens the V4L2 stream.  HTTP clients may
+        // reconnect while that thread is still probing.  Do not spawn a second
+        // capture thread here: it would contend for the same video node and
+        // overwrite `direct_handle`, making the original thread impossible to
+        // join from `stop()`.
+        if self.direct_active.load(Ordering::SeqCst) {
+            debug!("Capture thread is already active; waiting for its recovery loop");
+            return Ok(());
+        }
+
         if state == StreamerState::Uninitialized {
             // Auto-initialize if not done
             self.init_auto().await?;
@@ -994,7 +1005,13 @@ impl Streamer {
             );
 
             let buffer_pool = Arc::new(FrameBufferPool::new(BUFFER_COUNT.max(4) as usize));
-            let mut signal_present = true;
+            // Preserve the no-signal state across an outer-loop re-open.  This
+            // makes the first recovered frame transition the handler back
+            // online and publish Streaming instead of silently inheriting the
+            // previous offline state.
+            let mut signal_present = !handle
+                .block_on(async { self.state().await })
+                .is_no_signal_like();
             let mut idle_since: Option<std::time::Instant> = None;
 
             let mut fps_frame_count: u64 = 0;
@@ -1168,6 +1185,11 @@ impl Streamer {
                     no_signal_since = None;
                     no_signal_restart_count = 0;
                     set_retry(0);
+                    // Signal-loss handling marks the MJPEG handler offline so
+                    // stale HTTP responses close cleanly.  Re-enable it on the
+                    // first recovered frame so a reconnect can remain attached
+                    // to this (still single) capture thread.
+                    self.mjpeg_handler.set_online();
                     set_state(StreamerState::Streaming);
 
                     let fps_val = config.fps;
