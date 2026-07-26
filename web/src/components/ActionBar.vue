@@ -352,7 +352,7 @@ const hasRightOverflow = computed(() => {
               </Button>
             </PopoverTrigger>
             <PopoverContent class="w-[min(400px,90vw)] p-0" align="start">
-              <PasteModal @close="pasteOpen = false" />
+              <PasteModal v-if="pasteOpen" @close="pasteOpen = false" />
             </PopoverContent>
           </Popover>
         </div>
@@ -575,7 +575,7 @@ const hasRightOverflow = computed(() => {
       <SheetHeader class="mb-2">
         <SheetTitle>{{ t('actionbar.paste') }}</SheetTitle>
       </SheetHeader>
-      <PasteModal @close="mobilePasteOpen = false" />
+      <PasteModal v-if="mobilePasteOpen" @close="mobilePasteOpen = false" />
     </SheetContent>
   </Sheet>
 

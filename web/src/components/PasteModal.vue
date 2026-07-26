@@ -17,7 +17,7 @@ const emit = defineEmits<{
 const { t } = useI18n()
 
 const text = ref('')
-const textareaRef = ref<HTMLTextAreaElement | null>(null)
+const textareaRef = ref<{ focus: (options?: FocusOptions) => void } | null>(null)
 const isPasting = ref(false)
 const progress = ref(0)
 const currentChar = ref(0)
@@ -36,9 +36,7 @@ const hasUntypableChars = computed(() => {
 })
 
 onMounted(() => {
-  setTimeout(() => {
-    textareaRef.value?.focus()
-  }, 100)
+  textareaRef.value?.focus()
 })
 
 onUnmounted(() => {

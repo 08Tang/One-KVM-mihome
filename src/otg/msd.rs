@@ -1,10 +1,13 @@
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
 use super::configfs::{create_dir, create_symlink, remove_dir, remove_file, write_file};
 use super::function::GadgetFunction;
-use crate::error::{AppError, Result};
+use crate::error::{AppError, MsdErrorCode, Result};
+
+const MEDIA_TYPE_REBIND_DELAY_MS: u64 = 300;
 
 #[derive(Debug, Clone)]
 pub struct MsdLunConfig {
@@ -150,6 +153,71 @@ impl MsdFunction {
             )));
         }
 
+        let current_cdrom = fs::read_to_string(lun_path.join("cdrom"))
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let rebind_required = Self::media_type_rebind_required(&current_cdrom, config);
+        let udc_path = gadget_path.join("UDC");
+        let bound_udc = if rebind_required && udc_path.exists() {
+            fs::read_to_string(&udc_path)
+                .map_err(|error| {
+                    AppError::Internal(format!(
+                        "Failed to read bound UDC before changing LUN {lun} media type: {error}"
+                    ))
+                })?
+                .trim()
+                .to_string()
+        } else {
+            String::new()
+        };
+
+        if !bound_udc.is_empty() {
+            info!(
+                "LUN {} media type is changing; temporarily unbinding UDC {}",
+                lun, bound_udc
+            );
+            write_file(&udc_path, "")?;
+            std::thread::sleep(std::time::Duration::from_millis(MEDIA_TYPE_REBIND_DELAY_MS));
+        }
+
+        let configure_result = self.configure_lun_attributes(&lun_path, lun, config);
+        let rebind_result = if bound_udc.is_empty() {
+            Ok(())
+        } else {
+            let result = write_file(&udc_path, &bound_udc);
+            if result.is_ok() {
+                std::thread::sleep(std::time::Duration::from_millis(MEDIA_TYPE_REBIND_DELAY_MS));
+                info!(
+                    "Rebound UDC {} after changing LUN {} media type",
+                    bound_udc, lun
+                );
+            }
+            result
+        };
+
+        match (configure_result, rebind_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(configure_error), Ok(())) => Err(configure_error),
+            (Ok(()), Err(rebind_error)) => Err(AppError::Internal(format!(
+                "Configured LUN {lun}, but failed to rebind UDC {bound_udc}: {rebind_error}"
+            ))),
+            (Err(configure_error), Err(rebind_error)) => Err(AppError::Internal(format!(
+                "Failed to configure LUN {lun}: {configure_error}; also failed to rebind UDC {bound_udc}: {rebind_error}"
+            ))),
+        }
+    }
+
+    fn media_type_rebind_required(current_cdrom: &str, config: &MsdLunConfig) -> bool {
+        current_cdrom != if config.cdrom { "1" } else { "0" }
+    }
+
+    fn configure_lun_attributes(
+        &self,
+        lun_path: &Path,
+        lun: u8,
+        config: &MsdLunConfig,
+    ) -> Result<()> {
         let read_attr = |attr: &str| -> String {
             fs::read_to_string(lun_path.join(attr))
                 .unwrap_or_default()
@@ -161,7 +229,6 @@ impl MsdFunction {
         let current_ro = read_attr("ro");
         let current_removable = read_attr("removable");
         let current_nofua = read_attr("nofua");
-
         let new_cdrom = if config.cdrom { "1" } else { "0" };
         let new_ro = if config.ro { "1" } else { "0" };
         let new_removable = if config.removable { "1" } else { "0" };
@@ -170,15 +237,20 @@ impl MsdFunction {
         let forced_eject_path = lun_path.join("forced_eject");
         if forced_eject_path.exists() {
             debug!("Using forced_eject to clear LUN {}", lun);
-            let _ = write_file(&forced_eject_path, "1");
+            if let Err(error) = write_file(&forced_eject_path, "1") {
+                warn!(
+                    "LUN {} forced_eject failed while changing media: {}; clearing file instead",
+                    lun, error
+                );
+                write_file(&lun_path.join("file"), "")?;
+            }
         } else {
-            let _ = write_file(&lun_path.join("file"), "");
+            write_file(&lun_path.join("file"), "")?;
         }
 
         std::thread::sleep(std::time::Duration::from_millis(50));
 
-        let cdrom_changed = current_cdrom != new_cdrom;
-        if cdrom_changed {
+        if current_cdrom != new_cdrom {
             debug!(
                 "Updating LUN {} cdrom: {} -> {}",
                 lun, current_cdrom, new_cdrom
@@ -204,11 +276,6 @@ impl MsdFunction {
             write_file(&lun_path.join("nofua"), new_nofua)?;
         }
 
-        if cdrom_changed {
-            debug!("CDROM mode changed, brief yield for USB host");
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-
         if config.file.exists() {
             let file_path = config.file.to_string_lossy();
             let mut last_error = None;
@@ -225,10 +292,9 @@ impl MsdFunction {
                         );
                         return Ok(());
                     }
-                    Err(e) => {
-                        let is_busy = e.to_string().contains("Device or resource busy")
-                            || e.to_string().contains("os error 16");
-
+                    Err(error) => {
+                        let is_busy = error.to_string().contains("Device or resource busy")
+                            || error.to_string().contains("os error 16");
                         if is_busy && attempt < 4 {
                             warn!(
                                 "LUN {} file write busy, retrying (attempt {}/5)",
@@ -236,17 +302,16 @@ impl MsdFunction {
                                 attempt + 1
                             );
                             std::thread::sleep(std::time::Duration::from_millis(50 << attempt));
-                            last_error = Some(e);
+                            last_error = Some(error);
                             continue;
                         }
-
-                        return Err(e);
+                        return Err(error);
                     }
                 }
             }
 
-            if let Some(e) = last_error {
-                return Err(e);
+            if let Some(error) = last_error {
+                return Err(error);
             }
         } else if !config.file.as_os_str().is_empty() {
             warn!("LUN {} file does not exist: {}", lun, config.file.display());
@@ -276,6 +341,52 @@ impl MsdFunction {
         self.disconnect_lun_path(&lun_path, lun as u16)
     }
 
+    fn medium_removal_was_prevented(error: &std::io::Error) -> bool {
+        error.raw_os_error() == Some(libc::EBUSY)
+    }
+
+    fn clear_lun_file(file_path: &Path, lun: u16) -> Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .open(file_path)
+            .map_err(|error| {
+                warn!(
+                    lun,
+                    path = %file_path.display(),
+                    %error,
+                    "Failed to open MSD LUN backing-file attribute while disconnecting"
+                );
+                AppError::from(MsdErrorCode::MsdDisconnectFailed)
+            })?;
+
+        // An empty configfs value is represented by a newline. Keep this as one
+        // write operation so EBUSY can be attributed to fsg_store_file().
+        if let Err(error) = file.write_all(b"\n") {
+            warn!(
+                lun,
+                path = %file_path.display(),
+                errno = error.raw_os_error(),
+                %error,
+                "Kernel rejected MSD LUN disconnect"
+            );
+            return if Self::medium_removal_was_prevented(&error) {
+                Err(MsdErrorCode::MsdMediumRemovalPrevented.into())
+            } else {
+                Err(MsdErrorCode::MsdDisconnectFailed.into())
+            };
+        }
+
+        file.flush().map_err(|error| {
+            warn!(
+                lun,
+                path = %file_path.display(),
+                %error,
+                "Failed to flush MSD LUN backing-file attribute while disconnecting"
+            );
+            MsdErrorCode::MsdDisconnectFailed.into()
+        })
+    }
+
     fn disconnect_lun_path(&self, lun_path: &Path, lun: u16) -> Result<()> {
         if lun_path.exists() {
             let forced_eject_path = lun_path.join("forced_eject");
@@ -293,14 +404,14 @@ impl MsdFunction {
                         );
                         let file_path = lun_path.join("file");
                         if file_path.exists() {
-                            write_file(&file_path, "")?;
+                            Self::clear_lun_file(&file_path, lun)?;
                         }
                     }
                 }
             } else {
                 let file_path = lun_path.join("file");
                 if file_path.exists() {
-                    write_file(&file_path, "")?;
+                    Self::clear_lun_file(&file_path, lun)?;
                 }
             }
             info!("LUN {} disconnected", lun);
@@ -449,6 +560,98 @@ mod tests {
     }
 
     #[test]
+    fn only_ebusy_means_the_host_prevented_medium_removal() {
+        let busy = std::io::Error::from_raw_os_error(libc::EBUSY);
+        let io = std::io::Error::from_raw_os_error(libc::EIO);
+
+        assert!(MsdFunction::medium_removal_was_prevented(&busy));
+        assert!(!MsdFunction::medium_removal_was_prevented(&io));
+    }
+
+    #[test]
+    fn disconnect_lun_prefers_forced_eject() {
+        let temp_dir = TempDir::new().unwrap();
+        let lun_path = temp_dir.path().join("functions/mass_storage.usb0/lun.0");
+        std::fs::create_dir_all(&lun_path).unwrap();
+        std::fs::write(lun_path.join("file"), b"backing.img\n").unwrap();
+        std::fs::write(lun_path.join("forced_eject"), b"0\n").unwrap();
+        let msd = MsdFunction::new(0, 1).unwrap();
+
+        msd.disconnect_lun(temp_dir.path(), 0).unwrap();
+
+        assert_eq!(
+            std::fs::read(lun_path.join("forced_eject")).unwrap(),
+            b"1\n"
+        );
+        assert_eq!(
+            std::fs::read(lun_path.join("file")).unwrap(),
+            b"backing.img\n"
+        );
+    }
+
+    #[test]
+    fn disconnect_lun_without_forced_eject_clears_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let lun_path = temp_dir.path().join("functions/mass_storage.usb0/lun.0");
+        std::fs::create_dir_all(&lun_path).unwrap();
+        std::fs::write(lun_path.join("file"), b"backing.img\n").unwrap();
+        let msd = MsdFunction::new(0, 1).unwrap();
+
+        msd.disconnect_lun(temp_dir.path(), 0).unwrap();
+
+        assert!(std::fs::read(lun_path.join("file"))
+            .unwrap()
+            .starts_with(b"\n"));
+    }
+
+    #[test]
+    fn disconnect_lun_falls_back_when_forced_eject_write_fails() {
+        let temp_dir = TempDir::new().unwrap();
+        let lun_path = temp_dir.path().join("functions/mass_storage.usb0/lun.0");
+        std::fs::create_dir_all(lun_path.join("forced_eject")).unwrap();
+        std::fs::write(lun_path.join("file"), b"backing.img\n").unwrap();
+        let msd = MsdFunction::new(0, 1).unwrap();
+
+        msd.disconnect_lun(temp_dir.path(), 0).unwrap();
+
+        assert!(std::fs::read(lun_path.join("file"))
+            .unwrap()
+            .starts_with(b"\n"));
+    }
+
+    #[test]
+    fn disconnect_lun_only_changes_the_selected_lun() {
+        let temp_dir = TempDir::new().unwrap();
+        let function_path = temp_dir.path().join("functions/mass_storage.usb0");
+        for lun in 0..2 {
+            let lun_path = function_path.join(format!("lun.{lun}"));
+            std::fs::create_dir_all(&lun_path).unwrap();
+            std::fs::write(lun_path.join("file"), format!("backing-{lun}.img\n")).unwrap();
+            std::fs::write(lun_path.join("forced_eject"), b"0\n").unwrap();
+        }
+        let msd = MsdFunction::new(0, 8).unwrap();
+
+        msd.disconnect_lun(temp_dir.path(), 1).unwrap();
+
+        assert_eq!(
+            std::fs::read(function_path.join("lun.0/forced_eject")).unwrap(),
+            b"0\n"
+        );
+        assert_eq!(
+            std::fs::read(function_path.join("lun.1/forced_eject")).unwrap(),
+            b"1\n"
+        );
+        assert_eq!(
+            std::fs::read(function_path.join("lun.0/file")).unwrap(),
+            b"backing-0.img\n"
+        );
+        assert_eq!(
+            std::fs::read(function_path.join("lun.1/file")).unwrap(),
+            b"backing-1.img\n"
+        );
+    }
+
+    #[test]
     fn create_uses_configured_lun_capacity() {
         for capacity in [1, 8] {
             let temp_dir = TempDir::new().unwrap();
@@ -487,6 +690,81 @@ mod tests {
     }
 
     #[test]
+    fn media_type_changes_require_udc_rebind() {
+        let iso = MsdLunConfig::cdrom(PathBuf::from("/tmp/test.iso"));
+        let disk = MsdLunConfig::disk(PathBuf::from("/tmp/test.img"), false);
+
+        assert!(MsdFunction::media_type_rebind_required("0", &iso));
+        assert!(!MsdFunction::media_type_rebind_required("1", &iso));
+        assert!(MsdFunction::media_type_rebind_required("1", &disk));
+        assert!(!MsdFunction::media_type_rebind_required("0", &disk));
+    }
+
+    #[test]
+    fn configure_cdrom_restores_bound_udc() {
+        let temp_dir = TempDir::new().unwrap();
+        let lun_path = temp_dir.path().join("functions/mass_storage.usb0/lun.0");
+        std::fs::create_dir_all(&lun_path).unwrap();
+        for attr in ["file", "cdrom", "ro", "removable", "nofua"] {
+            std::fs::write(lun_path.join(attr), b"0\n").unwrap();
+        }
+        std::fs::write(temp_dir.path().join("UDC"), b"test.udc\n").unwrap();
+        let image_path = temp_dir.path().join("test.iso");
+        std::fs::write(&image_path, b"iso").unwrap();
+        let msd = MsdFunction::new(0, 1).unwrap();
+
+        msd.configure_lun(temp_dir.path(), 0, &MsdLunConfig::cdrom(image_path.clone()))
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(temp_dir.path().join("UDC"))
+                .unwrap()
+                .trim(),
+            "test.udc"
+        );
+        assert_eq!(
+            std::fs::read_to_string(lun_path.join("cdrom"))
+                .unwrap()
+                .trim(),
+            "1"
+        );
+        assert_eq!(
+            std::fs::read_to_string(lun_path.join("ro")).unwrap().trim(),
+            "1"
+        );
+        assert_eq!(
+            std::fs::read_to_string(lun_path.join("file"))
+                .unwrap()
+                .trim(),
+            image_path.to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn configure_failure_still_restores_bound_udc() {
+        let temp_dir = TempDir::new().unwrap();
+        let lun_path = temp_dir.path().join("functions/mass_storage.usb0/lun.0");
+        std::fs::create_dir_all(lun_path.join("file")).unwrap();
+        for attr in ["cdrom", "ro", "removable", "nofua"] {
+            std::fs::write(lun_path.join(attr), b"0\n").unwrap();
+        }
+        std::fs::write(temp_dir.path().join("UDC"), b"test.udc\n").unwrap();
+        let image_path = temp_dir.path().join("test.iso");
+        std::fs::write(&image_path, b"iso").unwrap();
+        let msd = MsdFunction::new(0, 1).unwrap();
+
+        assert!(msd
+            .configure_lun(temp_dir.path(), 0, &MsdLunConfig::cdrom(image_path),)
+            .is_err());
+        assert_eq!(
+            std::fs::read_to_string(temp_dir.path().join("UDC"))
+                .unwrap()
+                .trim(),
+            "test.udc"
+        );
+    }
+
+    #[test]
     fn cleanup_removes_all_dynamic_luns_including_stale_capacity() {
         let temp_dir = TempDir::new().unwrap();
         let func_path = temp_dir.path().join("functions/mass_storage.usb0");
@@ -498,6 +776,30 @@ mod tests {
         msd.cleanup(temp_dir.path()).unwrap();
 
         assert!(!func_path.exists());
+    }
+
+    #[test]
+    fn cleanup_forced_ejects_every_existing_lun() {
+        let temp_dir = TempDir::new().unwrap();
+        let func_path = temp_dir.path().join("functions/mass_storage.usb0");
+        for lun in 0..3 {
+            let lun_path = func_path.join(format!("lun.{lun}"));
+            std::fs::create_dir_all(&lun_path).unwrap();
+            std::fs::write(lun_path.join("file"), format!("backing-{lun}.img\n")).unwrap();
+            std::fs::write(lun_path.join("forced_eject"), b"0\n").unwrap();
+        }
+        let msd = MsdFunction::new(0, 1).unwrap();
+
+        // Ordinary files do not disappear with configfs groups, so cleanup is
+        // expected to report directory-removal failures in this test fixture.
+        assert!(msd.cleanup(temp_dir.path()).is_err());
+
+        for lun in 0..3 {
+            assert_eq!(
+                std::fs::read(func_path.join(format!("lun.{lun}/forced_eject"))).unwrap(),
+                b"1\n"
+            );
+        }
     }
 
     #[test]

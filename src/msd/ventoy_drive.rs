@@ -1,12 +1,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::info;
+use tracing::{info, warn};
 
 use ventoy_img::{FileInfo as VentoyFileInfo, VentoyError, VentoyImage};
 
 use super::types::{DriveFile, DriveInfo};
-use crate::error::{AppError, Result};
+use crate::error::{AppError, MsdErrorCode, Result};
 
 const STREAM_CHUNK_SIZE: usize = 64 * 1024;
 
@@ -44,10 +44,7 @@ impl VentoyDrive {
 
     pub async fn init(&self, size_mb: u32) -> Result<DriveInfo> {
         if size_mb < MIN_DRIVE_SIZE_MB {
-            return Err(AppError::BadRequest(format!(
-                "Drive size must be at least {} MB",
-                MIN_DRIVE_SIZE_MB
-            )));
+            return Err(MsdErrorCode::MsdDriveSizeInvalid.into());
         }
         let size_str = format!("{}M", size_mb);
         let path = self.path.clone();
@@ -59,7 +56,7 @@ impl VentoyDrive {
             VentoyImage::create(&path, &size_str, DEFAULT_LABEL).map_err(drive_init_error)?;
 
             let metadata = std::fs::metadata(&path)
-                .map_err(|e| AppError::Internal(format!("Failed to read drive metadata: {}", e)))?;
+                .map_err(|error| drive_io_error("read initialized drive metadata", error))?;
 
             Ok::<DriveInfo, AppError>(DriveInfo {
                 size: metadata.len(),
@@ -70,7 +67,7 @@ impl VentoyDrive {
             })
         })
         .await
-        .map_err(|e| AppError::Internal(format!("Task join error: {}", e)))??;
+        .map_err(|error| task_error("initialize virtual drive", error))??;
 
         info!("Ventoy drive created successfully");
         Ok(info)
@@ -78,7 +75,7 @@ impl VentoyDrive {
 
     pub async fn info(&self) -> Result<DriveInfo> {
         if !self.exists() {
-            return Err(AppError::Internal("Drive not initialized".to_string()));
+            return Err(MsdErrorCode::MsdDriveNotInitialized.into());
         }
 
         let path = self.path.clone();
@@ -86,7 +83,7 @@ impl VentoyDrive {
 
         tokio::task::spawn_blocking(move || {
             let metadata = std::fs::metadata(&path)
-                .map_err(|e| AppError::Internal(format!("Failed to read drive metadata: {}", e)))?;
+                .map_err(|error| drive_io_error("read drive metadata", error))?;
 
             let image = VentoyImage::open(&path).map_err(ventoy_to_app_error)?;
 
@@ -110,12 +107,12 @@ impl VentoyDrive {
             })
         })
         .await
-        .map_err(|e| AppError::Internal(format!("Task join error: {}", e)))?
+        .map_err(|error| task_error("read virtual drive info", error))?
     }
 
     pub async fn list_files(&self, dir_path: &str) -> Result<Vec<DriveFile>> {
         if !self.exists() {
-            return Err(AppError::Internal("Drive not initialized".to_string()));
+            return Err(MsdErrorCode::MsdDriveNotInitialized.into());
         }
 
         let path = self.path.clone();
@@ -138,7 +135,7 @@ impl VentoyDrive {
                 .collect())
         })
         .await
-        .map_err(|e| AppError::Internal(format!("Task join error: {}", e)))?
+        .map_err(|error| task_error("list virtual drive files", error))?
     }
 
     pub async fn write_file_from_multipart_field(
@@ -147,7 +144,7 @@ impl VentoyDrive {
         mut field: axum::extract::multipart::Field<'_>,
     ) -> Result<u64> {
         if !self.exists() {
-            return Err(AppError::Internal("Drive not initialized".to_string()));
+            return Err(MsdErrorCode::MsdDriveNotInitialized.into());
         }
 
         let temp_dir = self.path.parent().unwrap_or(Path::new("/tmp"));
@@ -156,24 +153,23 @@ impl VentoyDrive {
 
         let mut temp_file = tokio::fs::File::create(&temp_path)
             .await
-            .map_err(|e| AppError::Internal(format!("Failed to create temp file: {}", e)))?;
+            .map_err(|error| drive_io_error("create virtual drive upload", error))?;
 
         let mut bytes_written: u64 = 0;
 
-        while let Some(chunk) = field
-            .chunk()
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to read upload chunk: {}", e)))?
-        {
+        while let Some(chunk) = field.chunk().await.map_err(|error| {
+            warn!(%error, "Failed to read virtual drive upload chunk");
+            AppError::from(MsdErrorCode::MsdOperationFailed)
+        })? {
             bytes_written += chunk.len() as u64;
             tokio::io::AsyncWriteExt::write_all(&mut temp_file, &chunk)
                 .await
-                .map_err(|e| AppError::Internal(format!("Failed to write chunk: {}", e)))?;
+                .map_err(|error| drive_io_error("write virtual drive upload", error))?;
         }
 
         tokio::io::AsyncWriteExt::flush(&mut temp_file)
             .await
-            .map_err(|e| AppError::Internal(format!("Failed to flush temp file: {}", e)))?;
+            .map_err(|error| drive_io_error("flush virtual drive upload", error))?;
         drop(temp_file);
 
         let path = self.path.clone();
@@ -191,7 +187,7 @@ impl VentoyDrive {
             Ok::<(), AppError>(())
         })
         .await
-        .map_err(|e| AppError::Internal(format!("Task join error: {}", e)))?;
+        .map_err(|error| task_error("write virtual drive file", error))?;
 
         let _ = tokio::fs::remove_file(&temp_path).await;
 
@@ -202,7 +198,7 @@ impl VentoyDrive {
     #[cfg(test)]
     pub async fn read_file(&self, file_path: &str) -> Result<Vec<u8>> {
         if !self.exists() {
-            return Err(AppError::Internal("Drive not initialized".to_string()));
+            return Err(MsdErrorCode::MsdDriveNotInitialized.into());
         }
 
         let path = self.path.clone();
@@ -215,12 +211,12 @@ impl VentoyDrive {
             image.read_file(&file_path).map_err(ventoy_to_app_error)
         })
         .await
-        .map_err(|e| AppError::Internal(format!("Task join error: {}", e)))?
+        .map_err(|error| task_error("read virtual drive file", error))?
     }
 
     pub async fn get_file_info(&self, file_path: &str) -> Result<Option<DriveFile>> {
         if !self.exists() {
-            return Err(AppError::Internal("Drive not initialized".to_string()));
+            return Err(MsdErrorCode::MsdDriveNotInitialized.into());
         }
 
         let path = self.path.clone();
@@ -234,7 +230,7 @@ impl VentoyDrive {
                 .map_err(ventoy_to_app_error)
         })
         .await
-        .map_err(|e| AppError::Internal(format!("Task join error: {}", e)))??;
+        .map_err(|error| task_error("read virtual drive file information", error))??;
 
         Ok(info.map(|f| DriveFile {
             name: f.name,
@@ -253,19 +249,16 @@ impl VentoyDrive {
         tokio::sync::mpsc::Receiver<std::result::Result<bytes::Bytes, std::io::Error>>,
     )> {
         if !self.exists() {
-            return Err(AppError::Internal("Drive not initialized".to_string()));
+            return Err(MsdErrorCode::MsdDriveNotInitialized.into());
         }
 
         let file_info = self
             .get_file_info(file_path)
             .await?
-            .ok_or_else(|| AppError::NotFound(format!("File not found: {}", file_path)))?;
+            .ok_or_else(|| AppError::from(MsdErrorCode::MsdResourceNotFound))?;
 
         if file_info.is_dir {
-            return Err(AppError::BadRequest(format!(
-                "'{}' is a directory",
-                file_path
-            )));
+            return Err(MsdErrorCode::MsdInvalidRequest.into());
         }
 
         let file_size = file_info.size;
@@ -300,7 +293,7 @@ impl VentoyDrive {
 
     pub async fn mkdir(&self, dir_path: &str) -> Result<()> {
         if !self.exists() {
-            return Err(AppError::Internal("Drive not initialized".to_string()));
+            return Err(MsdErrorCode::MsdDriveNotInitialized.into());
         }
 
         let path = self.path.clone();
@@ -315,12 +308,12 @@ impl VentoyDrive {
                 .map_err(ventoy_to_app_error)
         })
         .await
-        .map_err(|e| AppError::Internal(format!("Task join error: {}", e)))?
+        .map_err(|error| task_error("create virtual drive directory", error))?
     }
 
     pub async fn delete(&self, path_to_delete: &str) -> Result<()> {
         if !self.exists() {
-            return Err(AppError::Internal("Drive not initialized".to_string()));
+            return Err(MsdErrorCode::MsdDriveNotInitialized.into());
         }
 
         let path = self.path.clone();
@@ -335,22 +328,23 @@ impl VentoyDrive {
                 .map_err(ventoy_to_app_error)
         })
         .await
-        .map_err(|e| AppError::Internal(format!("Task join error: {}", e)))?
+        .map_err(|error| task_error("delete virtual drive resource", error))?
     }
 }
 
 fn ventoy_to_app_error(err: VentoyError) -> AppError {
+    warn!(%err, "Virtual drive filesystem operation failed");
     match err {
-        VentoyError::Io(e) => AppError::Io(e),
-        VentoyError::InvalidSize(s) => AppError::BadRequest(format!("Invalid size: {}", s)),
-        VentoyError::SizeParseError(s) => AppError::BadRequest(format!("Size parse error: {}", s)),
-        VentoyError::FilesystemError(s) => AppError::Internal(format!("Filesystem error: {}", s)),
-        VentoyError::ImageError(s) => AppError::Internal(format!("Image error: {}", s)),
-        VentoyError::FileNotFound(s) => AppError::NotFound(format!("File not found: {}", s)),
-        VentoyError::ResourceNotFound(s) => {
-            AppError::Internal(format!("Resource not found: {}", s))
+        VentoyError::Io(error) => drive_io_error("access virtual drive", error),
+        VentoyError::InvalidSize(_) | VentoyError::SizeParseError(_) => {
+            MsdErrorCode::MsdDriveSizeInvalid.into()
         }
-        VentoyError::PartitionError(s) => AppError::Internal(format!("Partition error: {}", s)),
+        VentoyError::FilesystemError(_)
+        | VentoyError::ImageError(_)
+        | VentoyError::PartitionError(_) => MsdErrorCode::MsdDriveFilesystemUnsupported.into(),
+        VentoyError::FileNotFound(_) | VentoyError::ResourceNotFound(_) => {
+            MsdErrorCode::MsdResourceNotFound.into()
+        }
     }
 }
 
@@ -361,21 +355,35 @@ fn drive_init_error(err: VentoyError) -> AppError {
 
     #[cfg(unix)]
     match error.raw_os_error() {
-        Some(libc::EFBIG) => AppError::BadRequest(
-            "MSD directory filesystem does not support a virtual drive file of this size".into(),
-        ),
-        Some(libc::ENOSPC) => AppError::BadRequest(
-            "MSD directory does not have enough free space for the virtual drive".into(),
-        ),
-        Some(libc::EROFS) => AppError::BadRequest("MSD directory filesystem is read-only".into()),
-        Some(libc::EACCES | libc::EPERM) => AppError::BadRequest(
-            "One-KVM does not have permission to write to the MSD directory".into(),
-        ),
-        _ => AppError::Io(error),
+        Some(libc::EFBIG) => MsdErrorCode::MsdDriveSizeInvalid.into(),
+        Some(libc::ENOSPC) => MsdErrorCode::MsdStorageFull.into(),
+        Some(libc::EROFS) => MsdErrorCode::MsdStorageReadOnly.into(),
+        Some(libc::EACCES | libc::EPERM) => MsdErrorCode::MsdStoragePermissionDenied.into(),
+        _ => drive_io_error("initialize virtual drive", error),
     }
 
     #[cfg(not(unix))]
-    AppError::Io(error)
+    drive_io_error("initialize virtual drive", error)
+}
+
+fn drive_io_error(operation: &'static str, error: std::io::Error) -> AppError {
+    warn!(operation, %error, "Virtual drive storage operation failed");
+    #[cfg(unix)]
+    let code = match error.raw_os_error() {
+        Some(libc::EFBIG) => MsdErrorCode::MsdImageTooLarge,
+        Some(libc::ENOSPC) => MsdErrorCode::MsdStorageFull,
+        Some(libc::EROFS) => MsdErrorCode::MsdStorageReadOnly,
+        Some(libc::EACCES | libc::EPERM) => MsdErrorCode::MsdStoragePermissionDenied,
+        _ => MsdErrorCode::MsdOperationFailed,
+    };
+    #[cfg(not(unix))]
+    let code = MsdErrorCode::MsdOperationFailed;
+    code.into()
+}
+
+fn task_error(operation: &'static str, error: tokio::task::JoinError) -> AppError {
+    warn!(operation, %error, "Virtual drive task failed");
+    MsdErrorCode::MsdOperationFailed.into()
 }
 
 fn ventoy_file_to_drive_file(info: VentoyFileInfo, parent_path: &str) -> DriveFile {
@@ -470,14 +478,33 @@ mod tests {
     #[test]
     fn classifies_drive_creation_io_errors() {
         for (errno, expected) in [
-            (libc::EFBIG, "does not support"),
-            (libc::ENOSPC, "enough free space"),
-            (libc::EROFS, "read-only"),
-            (libc::EACCES, "permission"),
+            (libc::EFBIG, MsdErrorCode::MsdDriveSizeInvalid),
+            (libc::ENOSPC, MsdErrorCode::MsdStorageFull),
+            (libc::EROFS, MsdErrorCode::MsdStorageReadOnly),
+            (libc::EACCES, MsdErrorCode::MsdStoragePermissionDenied),
+            (libc::EPERM, MsdErrorCode::MsdStoragePermissionDenied),
         ] {
             let error = drive_init_error(VentoyError::Io(std::io::Error::from_raw_os_error(errno)));
-            assert!(matches!(error, AppError::BadRequest(message) if message.contains(expected)));
+            assert!(matches!(error, AppError::Msd(error) if error.code() == expected));
         }
+    }
+
+    #[test]
+    fn classifies_ventoy_filesystem_and_resource_errors() {
+        for error in [
+            VentoyError::FilesystemError("details".into()),
+            VentoyError::ImageError("details".into()),
+            VentoyError::PartitionError("details".into()),
+        ] {
+            assert!(matches!(
+                ventoy_to_app_error(error),
+                AppError::Msd(error) if error.code() == MsdErrorCode::MsdDriveFilesystemUnsupported
+            ));
+        }
+        assert!(matches!(
+            ventoy_to_app_error(VentoyError::FileNotFound("details".into())),
+            AppError::Msd(error) if error.code() == MsdErrorCode::MsdResourceNotFound
+        ));
     }
 
     fn init_ventoy_resources() -> bool {

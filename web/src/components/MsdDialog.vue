@@ -4,7 +4,7 @@ import { useI18n } from 'vue-i18n'
 import { toast } from 'vue-sonner'
 import { useSystemStore } from '@/stores/system'
 import { msdApi, type MsdImage, type DriveFile, type MountedMedia, type DiskMode } from '@/api'
-import { ApiError } from '@/api/request'
+import { ApiError, localizeMsdErrorCode } from '@/api/request'
 import { useWebSocket } from '@/composables/useWebSocket'
 import {
   Dialog,
@@ -64,9 +64,11 @@ const systemStore = useSystemStore()
 const { on, off } = useWebSocket()
 
 const activeTab = ref('images')
+const msdStatusError = ref<string | null>(null)
 
 const images = ref<MsdImage[]>([])
 const loadingImages = ref(false)
+const imagesError = ref<string | null>(null)
 const uploadProgress = ref(0)
 const uploading = ref(false)
 
@@ -92,6 +94,8 @@ const driveInitialized = ref(false)
 const uploadingFile = ref(false)
 const fileUploadProgress = ref(0)
 const driveError = ref<string | null>(null) // filesystem error (e.g. unsupported format)
+const driveErrorCode = ref<string | null>(null)
+const driveFilesystemUnsupported = computed(() => driveErrorCode.value === 'MSD_DRIVE_FILESYSTEM_UNSUPPORTED')
 
 const showDeleteDialog = ref(false)
 const deleteTarget = ref<{ type: 'image' | 'file'; id: string; name: string } | null>(null)
@@ -150,7 +154,9 @@ const downloadProgress = ref<{
   total_bytes: number | null
   progress_pct: number | null
   status: string
+  error_code: string | null
 } | null>(null)
+const downloadFailureNotifiedId = ref<string | null>(null)
 
 const TWO_POINT_TWO_GB = 2.2 * 1024 * 1024 * 1024
 const tabTriggerClass = 'h-8 rounded-md border-0 bg-transparent text-center text-muted-foreground shadow-none hover:text-foreground data-[state=active]:border-0 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm'
@@ -241,7 +247,7 @@ async function refreshDiskSpace() {
 
 async function loadData() {
   await refreshDiskSpace()
-  await systemStore.fetchMsdState()
+  await refreshMsdState()
   await loadImages()
   await loadDriveInfo()
   if (driveInitialized.value) {
@@ -249,12 +255,24 @@ async function loadData() {
   }
 }
 
+async function refreshMsdState() {
+  msdStatusError.value = null
+  try {
+    await systemStore.fetchMsdState()
+  } catch (e: any) {
+    msdStatusError.value = e?.message ?? t('msd.errors.operationFailed')
+  }
+}
+
 async function loadImages() {
   loadingImages.value = true
+  imagesError.value = null
   try {
     images.value = await msdApi.listImages()
-  } catch (e) {
+  } catch (e: any) {
     console.error('Failed to load images:', e)
+    imagesError.value = e?.message ?? t('msd.errors.operationFailed')
+    images.value = []
   } finally {
     loadingImages.value = false
   }
@@ -308,7 +326,7 @@ async function confirmImageMount() {
   connecting.value = true
   try {
     await msdApi.mountImage(image.id, cdromMode.value, cdromMode.value || readOnly.value)
-    await systemStore.fetchMsdState()
+    await refreshMsdState()
     showMountOptionsDialog.value = false
     pendingMountImage.value = null
   } catch (e) {
@@ -333,7 +351,7 @@ async function connectDrive() {
   connecting.value = true
   try {
     await msdApi.mountDrive()
-    await systemStore.fetchMsdState()
+    await refreshMsdState()
   } catch (e) {
     console.error('Failed to mount drive:', e)
   } finally {
@@ -352,7 +370,7 @@ async function unmountMedia(media: MountedMedia) {
     } else {
       await msdApi.unmountImage(media.id)
     }
-    await systemStore.fetchMsdState()
+    await refreshMsdState()
   } catch (e) {
     console.error('Failed to unmount media:', e)
   } finally {
@@ -374,7 +392,7 @@ async function changeDiskMode(value: unknown) {
   modeChanging.value = true
   try {
     await msdApi.setDiskMode(next as DiskMode)
-    await systemStore.fetchMsdState()
+    await refreshMsdState()
   } catch (e) {
     console.error('Failed to change MSD disk mode:', e)
   } finally {
@@ -408,9 +426,8 @@ async function executeDelete() {
       await msdApi.deleteDriveFile(deleteTarget.value.id)
       await loadDriveFiles()
     }
-  } catch (e: any) {
+  } catch (e) {
     console.error('Failed to delete:', e)
-    toast.error(t('common.error'), { description: e?.message })
   } finally {
     showDeleteDialog.value = false
     deleteTarget.value = null
@@ -420,12 +437,13 @@ async function executeDelete() {
 
 async function loadDriveInfo() {
   driveError.value = null
+  driveErrorCode.value = null
   try {
     driveInfo.value = await msdApi.driveInfo()
     driveInitialized.value = true
   } catch (e: any) {
     if (e instanceof ApiError) {
-      if (e.status === 404) {
+      if (e.code === 'MSD_DRIVE_NOT_INITIALIZED' || e.status === 404) {
         // Drive image file does not exist — truly not initialized
         driveInitialized.value = false
         driveInfo.value = null
@@ -435,6 +453,7 @@ async function loadDriveInfo() {
         // an error banner instead of the misleading "Initialize Drive" button.
         driveInitialized.value = true
         driveError.value = e.message
+        driveErrorCode.value = e.code ?? null
         driveInfo.value = null
       }
     } else {
@@ -469,16 +488,6 @@ async function createDrive() {
     showDriveInitDialog.value = false
   } catch (e) {
     console.error('Failed to initialize drive:', e)
-    let description: string | undefined
-    if (e instanceof ApiError) {
-      const message = e.message
-      if (message.includes('does not support a virtual drive file')) description = t('msd.driveFileTooLarge')
-      else if (message.includes('does not have enough free space')) description = t('msd.driveSpaceUnavailable')
-      else if (message.includes('filesystem is read-only')) description = t('msd.driveReadOnly')
-      else if (message.includes('permission to write')) description = t('msd.drivePermissionDenied')
-      else description = message
-    }
-    toast.error(t('msd.driveCreateFailed'), { description })
   } finally {
     initializingDrive.value = false
   }
@@ -510,12 +519,14 @@ async function loadDriveFiles() {
   }
   loadingDrive.value = true
   driveError.value = null
+  driveErrorCode.value = null
   try {
     driveFiles.value = await msdApi.listDriveFiles(currentPath.value)
   } catch (e: any) {
     console.error('Failed to load drive files:', e)
     // Surface the error — could be unsupported filesystem format
     driveError.value = e?.message ?? String(e)
+    driveErrorCode.value = e instanceof ApiError ? (e.code ?? null) : null
     driveFiles.value = []
   } finally {
     loadingDrive.value = false
@@ -564,9 +575,8 @@ async function handleFileUpload(e: Event) {
       fileUploadProgress.value = progress
     })
     await loadDriveFiles()
-  } catch (e: any) {
+  } catch (e) {
     console.error('Failed to upload file:', e)
-    toast.error(t('msd.uploadFailed'), { description: e?.message })
   } finally {
     uploadingFile.value = false
     fileUploadProgress.value = 0
@@ -591,9 +601,8 @@ async function createFolder() {
       : currentPath.value + '/' + newFolderName.value
     await msdApi.createDirectory(path)
     await loadDriveFiles()
-  } catch (e: any) {
+  } catch (e) {
     console.error('Failed to create folder:', e)
-    toast.error(t('common.error'), { description: e?.message })
   } finally {
     showNewFolderDialog.value = false
     newFolderName.value = ''
@@ -616,6 +625,7 @@ async function startUrlDownload() {
       total_bytes: result.total_bytes,
       progress_pct: result.progress_pct,
       status: result.status,
+      error_code: result.error_code,
     }
   } catch (e) {
     console.error('Failed to start download:', e)
@@ -649,6 +659,7 @@ function handleDownloadProgress(data: {
   total_bytes: number | null
   progress_pct: number | null
   status: string
+  error_code: string | null
 }) {
   if (downloadProgress.value?.download_id === data.download_id) {
     downloadProgress.value = data
@@ -659,8 +670,14 @@ function handleDownloadProgress(data: {
         showUrlDialog.value = false
         resetDownloadState()
       }, 1000)
-    } else if (data.status.startsWith('failed')) {
+    } else if (data.status === 'failed') {
       downloading.value = false
+      if (downloadFailureNotifiedId.value !== data.download_id) {
+        downloadFailureNotifiedId.value = data.download_id
+        toast.error(t('msd.operations.downloadImage'), {
+          description: localizeMsdErrorCode(data.error_code ?? undefined),
+        })
+      }
     }
   }
 }
@@ -747,6 +764,17 @@ onUnmounted(() => {
 
       <Separator class="shrink-0" />
 
+      <div
+        v-if="msdStatusError"
+        class="mx-5 mt-3 flex shrink-0 items-center justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/5 p-3"
+      >
+        <div class="min-w-0">
+          <p class="text-sm font-medium text-destructive">{{ t('msd.operations.loadStatus') }}</p>
+          <p class="mt-1 text-xs text-muted-foreground">{{ msdStatusError }}</p>
+        </div>
+        <Button variant="outline" size="sm" @click="refreshMsdState">{{ t('common.retry') }}</Button>
+      </div>
+
       <div class="flex-1 min-h-0 flex flex-col px-5 pb-4 pt-3">
         <Tabs v-model="activeTab" class="flex-1 flex flex-col min-h-0">
           <TabsList class="grid h-auto w-full shrink-0 grid-cols-2 gap-1 rounded-md border border-border bg-muted p-0.5">
@@ -796,6 +824,16 @@ onUnmounted(() => {
               <Progress v-if="uploading" :model-value="uploadProgress" class="h-1 shrink-0" />
 
               <Skeleton v-if="loadingImages" class="h-24 w-full" />
+              <div
+                v-else-if="imagesError"
+                class="flex shrink-0 items-center justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/5 p-3"
+              >
+                <div class="min-w-0">
+                  <p class="text-sm font-medium text-destructive">{{ t('msd.operations.loadImages') }}</p>
+                  <p class="mt-1 text-xs text-muted-foreground">{{ imagesError }}</p>
+                </div>
+                <Button variant="outline" size="sm" @click="loadImages">{{ t('common.retry') }}</Button>
+              </div>
               <Empty v-else-if="images.length === 0" class="shrink-0 py-6">
                 <EmptyHeader>
                   <EmptyMedia variant="icon"><HardDrive /></EmptyMedia>
@@ -929,7 +967,7 @@ onUnmounted(() => {
                     <!-- Show unreadable badge when format is wrong -->
                     <template v-else-if="driveError">
                       <Badge variant="outline" class="text-xs border-destructive/50 text-destructive">
-                        {{ t('msd.driveUnreadable') }}
+                        {{ driveFilesystemUnsupported ? t('msd.driveUnreadable') : t('common.error') }}
                       </Badge>
                       <Tooltip>
                         <TooltipTrigger as-child>
@@ -938,14 +976,14 @@ onUnmounted(() => {
                           </span>
                         </TooltipTrigger>
                         <TooltipContent>
-                          <p>{{ t('msd.driveUnreadableTooltip') }}</p>
+                          <p>{{ driveError }}</p>
                         </TooltipContent>
                       </Tooltip>
                     </template>
                   </div>
                   <div class="flex items-center gap-1.5">
                     <!-- When drive format is unrecognized, only offer re-initialization -->
-                    <template v-if="driveError && !msdConnected">
+                    <template v-if="driveFilesystemUnsupported && !msdConnected">
                       <Button
                         variant="outline"
                         size="sm"
@@ -1011,6 +1049,17 @@ onUnmounted(() => {
                     <span>{{ formatBytes(driveInfo?.free || 0) }} {{ t('msd.freeSpace') }}</span>
                   </div>
                 </div>
+              </div>
+
+              <div
+                v-if="driveError"
+                class="flex shrink-0 items-center justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/5 p-3"
+              >
+                <div class="min-w-0">
+                  <p class="text-sm font-medium text-destructive">{{ t('msd.operations.loadDriveFiles') }}</p>
+                  <p class="mt-1 text-xs text-muted-foreground">{{ driveError }}</p>
+                </div>
+                <Button variant="outline" size="sm" @click="refreshDriveBrowser">{{ t('common.retry') }}</Button>
               </div>
 
 
@@ -1289,9 +1338,11 @@ onUnmounted(() => {
   <!-- Image Mount Options Dialog -->
   <Dialog v-model:open="showMountOptionsDialog">
     <DialogContent class="max-w-md">
-      <DialogHeader>
+      <DialogHeader class="min-w-0">
         <DialogTitle>{{ t('msd.mountImage') }}</DialogTitle>
-        <DialogDescription>
+        <DialogDescription
+          class="block min-w-0 truncate text-left"
+        >
           {{ pendingMountImage?.name }}
         </DialogDescription>
       </DialogHeader>
@@ -1410,8 +1461,8 @@ onUnmounted(() => {
           <div v-if="downloadProgress.status === 'completed'" class="text-xs text-success">
             {{ t('msd.downloadComplete') }}
           </div>
-          <div v-else-if="downloadProgress.status.startsWith('failed')" class="text-xs text-destructive">
-            {{ downloadProgress.status }}
+          <div v-else-if="downloadProgress.status === 'failed'" class="text-xs text-destructive">
+            {{ localizeMsdErrorCode(downloadProgress.error_code ?? undefined) }}
           </div>
         </div>
       </div>

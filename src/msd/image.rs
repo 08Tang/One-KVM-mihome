@@ -6,10 +6,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use time::OffsetDateTime;
 use tokio::io::AsyncWriteExt;
-use tracing::info;
+use tracing::{info, warn};
 
 use super::types::ImageInfo;
-use crate::error::{AppError, Result};
+use crate::error::{AppError, MsdErrorCode, Result};
 
 const MAX_IMAGE_SIZE: u64 = 32 * 1024 * 1024 * 1024;
 
@@ -28,7 +28,7 @@ impl ImageManager {
 
     pub fn ensure_dir(&self) -> Result<()> {
         fs::create_dir_all(&self.images_path)
-            .map_err(|e| AppError::Internal(format!("Failed to create images directory: {}", e)))?;
+            .map_err(|error| storage_io_error("create images directory", error))?;
         Ok(())
     }
 
@@ -38,11 +38,9 @@ impl ImageManager {
         let mut images = Vec::new();
 
         for entry in fs::read_dir(&self.images_path)
-            .map_err(|e| AppError::Internal(format!("Failed to read images directory: {}", e)))?
+            .map_err(|error| storage_io_error("read images directory", error))?
         {
-            let entry = entry.map_err(|e| {
-                AppError::Internal(format!("Failed to read directory entry: {}", e))
-            })?;
+            let entry = entry.map_err(|error| storage_io_error("read image entry", error))?;
 
             let path = entry.path();
             if path.is_file() {
@@ -88,13 +86,13 @@ impl ImageManager {
                 return Ok(image);
             }
         }
-        Err(AppError::NotFound(format!("Image not found: {}", id)))
+        Err(MsdErrorCode::MsdResourceNotFound.into())
     }
 
     pub fn get_by_name(&self, name: &str) -> Result<ImageInfo> {
         let path = self.images_path.join(name);
         self.get_image_info(&path)
-            .ok_or_else(|| AppError::NotFound(format!("Image not found: {}", name)))
+            .ok_or_else(|| MsdErrorCode::MsdResourceNotFound.into())
     }
 
     #[cfg(test)]
@@ -103,30 +101,24 @@ impl ImageManager {
 
         let name = sanitize_filename(name);
         if name.is_empty() {
-            return Err(AppError::Internal("Invalid filename".to_string()));
+            return Err(MsdErrorCode::MsdInvalidRequest.into());
         }
 
         if data.len() as u64 > MAX_IMAGE_SIZE {
-            return Err(AppError::Internal(format!(
-                "Image too large. Maximum size: {} GB",
-                MAX_IMAGE_SIZE / 1024 / 1024 / 1024
-            )));
+            return Err(MsdErrorCode::MsdImageTooLarge.into());
         }
 
         let path = self.images_path.join(&name);
         if path.exists() {
-            return Err(AppError::Internal(format!(
-                "Image already exists: {}",
-                name
-            )));
+            return Err(MsdErrorCode::MsdResourceAlreadyExists.into());
         }
 
-        let mut file = fs::File::create(&path)
-            .map_err(|e| AppError::Internal(format!("Failed to create image file: {}", e)))?;
+        let mut file =
+            fs::File::create(&path).map_err(|error| storage_io_error("create image", error))?;
 
-        file.write_all(data).map_err(|e| {
+        file.write_all(data).map_err(|error| {
             let _ = fs::remove_file(&path);
-            AppError::Internal(format!("Failed to write image data: {}", e))
+            storage_io_error("write image", error)
         })?;
 
         info!("Created image: {} ({} bytes)", name, data.len());
@@ -143,7 +135,7 @@ impl ImageManager {
 
         let name = sanitize_filename(name);
         if name.is_empty() {
-            return Err(AppError::Internal("Invalid filename".to_string()));
+            return Err(MsdErrorCode::MsdInvalidRequest.into());
         }
 
         let temp_name = format!(".upload_{}", uuid::Uuid::new_v4());
@@ -151,48 +143,41 @@ impl ImageManager {
         let final_path = self.images_path.join(&name);
 
         if final_path.exists() {
-            return Err(AppError::Internal(format!(
-                "Image already exists: {}",
-                name
-            )));
+            return Err(MsdErrorCode::MsdResourceAlreadyExists.into());
         }
 
         let mut file = tokio::fs::File::create(&temp_path)
             .await
-            .map_err(|e| AppError::Internal(format!("Failed to create temp file: {}", e)))?;
+            .map_err(|error| storage_io_error("create image upload", error))?;
 
         let mut bytes_written: u64 = 0;
 
-        while let Some(chunk) = field
-            .chunk()
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to read upload chunk: {}", e)))?
-        {
+        while let Some(chunk) = field.chunk().await.map_err(|error| {
+            warn!(%error, "Failed to read MSD image upload chunk");
+            AppError::from(MsdErrorCode::MsdOperationFailed)
+        })? {
             bytes_written += chunk.len() as u64;
             if bytes_written > MAX_IMAGE_SIZE {
                 drop(file);
                 let _ = tokio::fs::remove_file(&temp_path).await;
-                return Err(AppError::Internal(format!(
-                    "Image too large. Maximum size: {} GB",
-                    MAX_IMAGE_SIZE / 1024 / 1024 / 1024
-                )));
+                return Err(MsdErrorCode::MsdImageTooLarge.into());
             }
 
             file.write_all(&chunk)
                 .await
-                .map_err(|e| AppError::Internal(format!("Failed to write chunk: {}", e)))?;
+                .map_err(|error| storage_io_error("write image upload", error))?;
         }
 
         file.flush()
             .await
-            .map_err(|e| AppError::Internal(format!("Failed to flush file: {}", e)))?;
+            .map_err(|error| storage_io_error("flush image upload", error))?;
         drop(file);
 
         tokio::fs::rename(&temp_path, &final_path)
             .await
-            .map_err(|e| {
+            .map_err(|error| {
                 let _ = std::fs::remove_file(&temp_path);
-                AppError::Internal(format!("Failed to rename temp file: {}", e))
+                storage_io_error("commit image upload", error)
             })?;
 
         info!(
@@ -206,8 +191,7 @@ impl ImageManager {
     pub fn delete(&self, id: &str) -> Result<()> {
         let image = self.get(id)?;
 
-        fs::remove_file(&image.path)
-            .map_err(|e| AppError::Internal(format!("Failed to delete image: {}", e)))?;
+        fs::remove_file(&image.path).map_err(|error| storage_io_error("delete image", error))?;
 
         info!("Deleted image: {}", image.name);
         Ok(())
@@ -224,8 +208,11 @@ impl ImageManager {
     {
         self.ensure_dir()?;
 
-        let parsed_url = reqwest::Url::parse(url)
-            .map_err(|e| AppError::BadRequest(format!("Invalid URL: {}", e)))?;
+        let parsed_url =
+            reqwest::Url::parse(url).map_err(|_| AppError::from(MsdErrorCode::MsdInvalidUrl))?;
+        if !matches!(parsed_url.scheme(), "http" | "https") {
+            return Err(MsdErrorCode::MsdInvalidUrl.into());
+        }
 
         info!("Starting download from: {}", url);
 
@@ -233,19 +220,17 @@ impl ImageManager {
             .timeout(std::time::Duration::from_secs(3600))
             .connect_timeout(std::time::Duration::from_secs(30))
             .build()
-            .map_err(|e| AppError::Internal(format!("Failed to create HTTP client: {}", e)))?;
+            .map_err(|error| remote_download_error("create HTTP client", error))?;
 
         let head_response = client
             .head(url)
             .send()
             .await
-            .map_err(|e| AppError::Internal(format!("Failed to connect: {}", e)))?;
+            .map_err(|error| remote_download_error("send HEAD request", error))?;
 
         if !head_response.status().is_success() {
-            return Err(AppError::Internal(format!(
-                "Server returned error: {}",
-                head_response.status()
-            )));
+            warn!(status = %head_response.status(), "MSD image HEAD request failed");
+            return Err(MsdErrorCode::MsdRemoteDownloadFailed.into());
         }
 
         let total_size = head_response
@@ -256,11 +241,7 @@ impl ImageManager {
 
         if let Some(size) = total_size {
             if size > MAX_IMAGE_SIZE {
-                return Err(AppError::BadRequest(format!(
-                    "File too large: {} bytes (max {} GB)",
-                    size,
-                    MAX_IMAGE_SIZE / 1024 / 1024 / 1024
-                )));
+                return Err(MsdErrorCode::MsdImageTooLarge.into());
             }
         }
 
@@ -284,17 +265,12 @@ impl ImageManager {
         };
 
         if final_filename.is_empty() {
-            return Err(AppError::BadRequest(
-                "Could not determine filename".to_string(),
-            ));
+            return Err(MsdErrorCode::MsdInvalidRequest.into());
         }
 
         let final_path = self.images_path.join(&final_filename);
         if final_path.exists() {
-            return Err(AppError::BadRequest(format!(
-                "Image already exists: {}",
-                final_filename
-            )));
+            return Err(MsdErrorCode::MsdResourceAlreadyExists.into());
         }
 
         let temp_filename = format!(".download_{}", uuid::Uuid::new_v4());
@@ -304,13 +280,11 @@ impl ImageManager {
             .get(url)
             .send()
             .await
-            .map_err(|e| AppError::Internal(format!("Download failed: {}", e)))?;
+            .map_err(|error| remote_download_error("send GET request", error))?;
 
         if !response.status().is_success() {
-            return Err(AppError::Internal(format!(
-                "Download failed: HTTP {}",
-                response.status()
-            )));
+            warn!(status = %response.status(), "MSD image GET request failed");
+            return Err(MsdErrorCode::MsdRemoteDownloadFailed.into());
         }
 
         let content_length = response
@@ -322,7 +296,7 @@ impl ImageManager {
 
         let mut file = tokio::fs::File::create(&temp_path)
             .await
-            .map_err(|e| AppError::Internal(format!("Failed to create temp file: {}", e)))?;
+            .map_err(|error| storage_io_error("create image download", error))?;
 
         let mut stream = response.bytes_stream();
         let mut downloaded: u64 = 0;
@@ -334,11 +308,11 @@ impl ImageManager {
 
         while let Some(chunk_result) = stream.next().await {
             let chunk =
-                chunk_result.map_err(|e| AppError::Internal(format!("Download error: {}", e)))?;
+                chunk_result.map_err(|error| remote_download_error("read response body", error))?;
 
-            file.write_all(&chunk).await.map_err(|e| {
+            file.write_all(&chunk).await.map_err(|error| {
                 let _ = std::fs::remove_file(&temp_path);
-                AppError::Internal(format!("Failed to write data: {}", e))
+                storage_io_error("write image download", error)
             })?;
 
             downloaded += chunk.len() as u64;
@@ -360,29 +334,29 @@ impl ImageManager {
 
         file.flush()
             .await
-            .map_err(|e| AppError::Internal(format!("Failed to flush file: {}", e)))?;
+            .map_err(|error| storage_io_error("flush image download", error))?;
         drop(file);
 
         let metadata = tokio::fs::metadata(&temp_path)
             .await
-            .map_err(|e| AppError::Internal(format!("Failed to read file metadata: {}", e)))?;
+            .map_err(|error| storage_io_error("read downloaded image metadata", error))?;
 
         if let Some(expected) = content_length {
             if metadata.len() != expected {
                 let _ = tokio::fs::remove_file(&temp_path).await;
-                return Err(AppError::Internal(format!(
-                    "Download incomplete: got {} bytes, expected {}",
-                    metadata.len(),
-                    expected
-                )));
+                warn!(
+                    actual = metadata.len(),
+                    expected, "MSD image download was incomplete"
+                );
+                return Err(MsdErrorCode::MsdDownloadIncomplete.into());
             }
         }
 
         tokio::fs::rename(&temp_path, &final_path)
             .await
-            .map_err(|e| {
+            .map_err(|error| {
                 let _ = std::fs::remove_file(&temp_path);
-                AppError::Internal(format!("Failed to move file: {}", e))
+                storage_io_error("commit image download", error)
             })?;
 
         info!(
@@ -393,6 +367,26 @@ impl ImageManager {
 
         self.get_by_name(&final_filename)
     }
+}
+
+fn storage_io_error(operation: &'static str, error: std::io::Error) -> AppError {
+    warn!(operation, %error, "MSD storage operation failed");
+    #[cfg(unix)]
+    let code = match error.raw_os_error() {
+        Some(libc::EFBIG) => MsdErrorCode::MsdImageTooLarge,
+        Some(libc::ENOSPC) => MsdErrorCode::MsdStorageFull,
+        Some(libc::EROFS) => MsdErrorCode::MsdStorageReadOnly,
+        Some(libc::EACCES | libc::EPERM) => MsdErrorCode::MsdStoragePermissionDenied,
+        _ => MsdErrorCode::MsdOperationFailed,
+    };
+    #[cfg(not(unix))]
+    let code = MsdErrorCode::MsdOperationFailed;
+    code.into()
+}
+
+fn remote_download_error(operation: &'static str, error: reqwest::Error) -> AppError {
+    warn!(operation, %error, "MSD remote download failed");
+    MsdErrorCode::MsdRemoteDownloadFailed.into()
 }
 
 fn stable_image_id_from_filename(name: &str) -> String {
@@ -489,5 +483,19 @@ mod tests {
         manager.delete(&image.id).unwrap();
 
         assert!(manager.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn classifies_storage_io_errors() {
+        for (errno, expected) in [
+            (libc::EFBIG, MsdErrorCode::MsdImageTooLarge),
+            (libc::ENOSPC, MsdErrorCode::MsdStorageFull),
+            (libc::EROFS, MsdErrorCode::MsdStorageReadOnly),
+            (libc::EACCES, MsdErrorCode::MsdStoragePermissionDenied),
+            (libc::EPERM, MsdErrorCode::MsdStoragePermissionDenied),
+        ] {
+            let error = storage_io_error("test", std::io::Error::from_raw_os_error(errno));
+            assert!(matches!(error, AppError::Msd(error) if error.code() == expected));
+        }
     }
 }

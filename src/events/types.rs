@@ -204,6 +204,8 @@ pub enum SystemEvent {
         total_bytes: Option<u64>,
         progress_pct: Option<f32>,
         status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error_code: Option<String>,
     },
 
     #[serde(rename = "system.device_info")]
@@ -372,6 +374,7 @@ mod tests {
                 total_bytes: None,
                 progress_pct: None,
                 status: String::new(),
+                error_code: None,
             },
             SystemEvent::DeviceInfo {
                 video: VideoDeviceInfo {

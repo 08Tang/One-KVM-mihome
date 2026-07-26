@@ -6,7 +6,7 @@ use typeshare::typeshare;
 
 use super::bridge::NetworkBridgeRuntime;
 use super::manager::{wait_for_hid_devices, GadgetDescriptor, OtgGadgetManager};
-use super::msd::MsdFunction;
+use super::msd::{MsdFunction, MsdLunConfig};
 use crate::config::{
     HidBackend, HidConfig, MsdConfig, OtgDescriptorConfig, OtgHidFunctions, OtgNetworkConfig,
     UacConfig,
@@ -212,6 +212,27 @@ impl OtgService {
 
     pub async fn msd_lun_capacity(&self) -> u8 {
         self.desired.read().await.msd_lun_capacity
+    }
+
+    pub async fn configure_msd_lun(&self, lun: u8, config: &MsdLunConfig) -> Result<()> {
+        // Keep the manager locked across a possible UDC rebind so an OTG
+        // reconcile cannot replace the gadget halfway through the media-type
+        // transition.
+        let manager = self.manager.lock().await;
+        let gadget_path = manager
+            .as_ref()
+            .map(|value| value.gadget_path().clone())
+            .ok_or_else(|| AppError::Internal("OTG gadget is not active".to_string()))?;
+        let function = self
+            .msd_function
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| AppError::Internal("MSD function is not active".to_string()))?;
+
+        function
+            .configure_lun_async(&gadget_path, lun, config)
+            .await
     }
 
     pub async fn network_status(&self) -> OtgNetworkStatus {

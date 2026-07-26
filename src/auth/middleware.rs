@@ -71,6 +71,7 @@ pub async fn auth_middleware(
 fn unauthorized_response(message: &str) -> Response {
     let body = ErrorResponse {
         success: false,
+        code: None,
         message: message.to_string(),
     };
     (StatusCode::UNAUTHORIZED, Json(body)).into_response()

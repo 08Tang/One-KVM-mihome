@@ -1,4 +1,4 @@
-import { request, ApiError } from './request'
+import { request, uploadRequest, ApiError } from './request'
 import type {
   CanonicalKey,
   Ch9329DescriptorState,
@@ -620,61 +620,42 @@ export const msdApi = {
         } | null
         usb_reenumerating: boolean
       }
-    }>('/msd/status'),
+    }>('/msd/status', {}, { toastOnError: false }),
 
-  listImages: () => request<MsdImage[]>('/msd/images'),
+  listImages: () => request<MsdImage[]>('/msd/images', {}, { toastOnError: false }),
 
   uploadImage: async (file: File, onProgress?: (progress: number) => void) => {
     const formData = new FormData()
     formData.append('file', file)
 
-    const xhr = new XMLHttpRequest()
-    xhr.open('POST', `${API_BASE}/msd/images`)
-    xhr.withCredentials = true
-
-    return new Promise<MsdImage>((resolve, reject) => {
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable && onProgress) {
-          onProgress((e.loaded / e.total) * 100)
-        }
-      }
-
-      xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          resolve(JSON.parse(xhr.responseText))
-        } else {
-          reject(new ApiError(xhr.status, 'Upload failed'))
-        }
-      }
-
-      xhr.onerror = () => reject(new ApiError(0, 'Network error'))
-      xhr.send(formData)
+    return uploadRequest<MsdImage>('/msd/images', formData, onProgress, {
+      errorTitleKey: 'msd.operations.uploadImage',
     })
   },
 
   deleteImage: (id: string) =>
-    request<{ success: boolean }>(`/msd/images/${id}`, { method: 'DELETE' }),
+    request<{ success: boolean }>(`/msd/images/${id}`, { method: 'DELETE' }, { errorTitleKey: 'msd.operations.deleteImage' }),
 
   setDiskMode: (diskMode: DiskMode) =>
     request<{ success: boolean }>('/msd/disk-mode', {
       method: 'PUT',
       body: JSON.stringify({ disk_mode: diskMode }),
-    }),
+    }, { errorTitleKey: 'msd.operations.changeMode' }),
 
   mountImage: (id: string, cdrom: boolean, readOnly: boolean) =>
     request<{ success: boolean }>(`/msd/images/${id}/mount`, {
       method: 'POST',
       body: JSON.stringify({ cdrom, read_only: readOnly }),
-    }),
+    }, { errorTitleKey: 'msd.operations.mountImage' }),
 
   unmountImage: (id: string) =>
-    request<{ success: boolean }>(`/msd/images/${id}/mount`, { method: 'DELETE' }),
+    request<{ success: boolean }>(`/msd/images/${id}/mount`, { method: 'DELETE' }, { errorTitleKey: 'msd.operations.unmountImage' }),
 
   mountDrive: () =>
-    request<{ success: boolean }>('/msd/drive/mount', { method: 'POST' }),
+    request<{ success: boolean }>('/msd/drive/mount', { method: 'POST' }, { errorTitleKey: 'msd.operations.mountDrive' }),
 
   unmountDrive: () =>
-    request<{ success: boolean }>('/msd/drive/mount', { method: 'DELETE' }),
+    request<{ success: boolean }>('/msd/drive/mount', { method: 'DELETE' }, { errorTitleKey: 'msd.operations.unmountDrive' }),
 
   driveInfo: () =>
     request<{
@@ -696,11 +677,11 @@ export const msdApi = {
         method: 'POST',
         body: JSON.stringify({ size_mb: sizeMb }),
       },
-      { toastOnError: false },
+      { errorTitleKey: 'msd.operations.initializeDrive' },
     ),
 
   deleteDrive: () =>
-    request<{ success: boolean }>('/msd/drive', { method: 'DELETE' }),
+    request<{ success: boolean }>('/msd/drive', { method: 'DELETE' }, { errorTitleKey: 'msd.operations.deleteDrive' }),
 
   listDriveFiles: (path = '/') =>
     request<DriveFile[]>(
@@ -713,28 +694,12 @@ export const msdApi = {
     const formData = new FormData()
     formData.append('file', file)
 
-    const xhr = new XMLHttpRequest()
-    xhr.open('POST', `${API_BASE}/msd/drive/files?path=${encodeURIComponent(targetPath)}`)
-    xhr.withCredentials = true
-
-    return new Promise<{ success: boolean; message?: string }>((resolve, reject) => {
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable && onProgress) {
-          onProgress((e.loaded / e.total) * 100)
-        }
-      }
-
-      xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          resolve(JSON.parse(xhr.responseText))
-        } else {
-          reject(new ApiError(xhr.status, 'Upload failed'))
-        }
-      }
-
-      xhr.onerror = () => reject(new ApiError(0, 'Network error'))
-      xhr.send(formData)
-    })
+    return uploadRequest<{ success: boolean; message?: string }>(
+      `/msd/drive/files?path=${encodeURIComponent(targetPath)}`,
+      formData,
+      onProgress,
+      { errorTitleKey: 'msd.operations.uploadDriveFile' },
+    )
   },
 
   downloadDriveFile: (path: string) =>
@@ -743,12 +708,12 @@ export const msdApi = {
   deleteDriveFile: (path: string) =>
     request<{ success: boolean }>(`/msd/drive/files${encodeDrivePath(path)}`, {
       method: 'DELETE',
-    }),
+    }, { errorTitleKey: 'msd.operations.deleteDriveFile' }),
 
   createDirectory: (path: string) =>
     request<{ success: boolean }>(`/msd/drive/mkdir${encodeDrivePath(path)}`, {
       method: 'POST',
-    }),
+    }, { errorTitleKey: 'msd.operations.createDirectory' }),
 
   downloadFromUrl: (url: string, filename?: string) =>
     request<{
@@ -759,17 +724,17 @@ export const msdApi = {
       total_bytes: number | null
       progress_pct: number | null
       status: string
-      error: string | null
+      error_code: string | null
     }>('/msd/images/download', {
       method: 'POST',
       body: JSON.stringify({ url, filename }),
-    }),
+    }, { errorTitleKey: 'msd.operations.startDownload' }),
 
   cancelDownload: (downloadId: string) =>
     request<{ success: boolean }>('/msd/images/download/cancel', {
       method: 'POST',
       body: JSON.stringify({ download_id: downloadId }),
-    }),
+    }, { errorTitleKey: 'msd.operations.cancelDownload' }),
 }
 
 interface SerialDeviceOption {

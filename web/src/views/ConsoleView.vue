@@ -572,7 +572,7 @@ const msdQuickInfo = computed(() => {
   const msd = systemStore.msd
   if (!msd?.available) return ''
   if (msd.mountedCount === 0) return t('statusCard.msdStandby')
-  return `${msd.diskMode === 'single' ? t('msd.singleDiskMode') : t('msd.multiDiskMode')} · ${t('msd.mediaCount', { count: msd.mountedCount, capacity: msd.slotCapacity })}`
+  return msd.diskMode === 'single' ? t('msd.singleDiskMode') : t('msd.multiDiskMode')
 })
 
 const msdErrorMessage = computed(() => {
@@ -604,18 +604,6 @@ const msdDetails = computed<StatusDetail[]>(() => {
     value: msd.diskMode === 'single' ? t('msd.singleDiskMode') : t('msd.multiDiskMode'),
     status: msd.mountedCount > 0 ? 'ok' : undefined
   })
-
-  if (msd.mountedMedia.length > 0) {
-    for (const media of msd.mountedMedia) {
-      details.push({
-        label: media.kind === 'drive' ? t('statusCard.msdDriveMode') : t('statusCard.msdCurrentImage'),
-        value: media.kind === 'drive'
-          ? t('statusCard.msdDriveMode')
-          : `${media.name || media.id || t('statusCard.msdNoImage')} (${media.cdrom ? t('msd.cdrom') : t('msd.flash')})`,
-        status: 'ok'
-      })
-    }
-  }
 
   return details
 })

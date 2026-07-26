@@ -235,7 +235,7 @@ pub struct DownloadProgress {
     pub total_bytes: Option<u64>,
     pub progress_pct: Option<f32>,
     pub status: DownloadStatus,
-    pub error: Option<String>,
+    pub error_code: Option<String>,
 }
 
 #[cfg(test)]
