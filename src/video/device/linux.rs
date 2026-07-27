@@ -1172,7 +1172,34 @@ fn sysfs_maybe_capture(path: &Path) -> bool {
         .to_lowercase();
     let driver = extract_uevent_value(&uevent, "driver");
 
-    let mut maybe_capture = false;
+    sysfs_identity_maybe_capture(&sysfs_name, driver.as_deref())
+}
+
+fn sysfs_identity_maybe_capture(sysfs_name: &str, driver: Option<&str>) -> bool {
+    // rkisp mainpath/selfpath are real frame-capture queues even though their
+    // names contain the generic "isp" skip hint below. Keep the allow-list
+    // narrow: rkisp also registers metadata and raw read/write nodes that
+    // must not be probed as ordinary frame-capture devices.
+    let is_rkisp_capture = sysfs_name.contains("rkisp")
+        && (sysfs_name.contains("mainpath") || sysfs_name.contains("selfpath"));
+    let is_rkisp_non_capture = [
+        "rkisp1_stats",
+        "rkisp1_params",
+        "rkisp_stats",
+        "rkisp_params",
+        "rkisp-statistics",
+        "rkisp-input-params",
+        "rkisp_rawrd",
+        "rkisp_rawwr",
+    ]
+    .iter()
+    .any(|hint| sysfs_name.contains(hint));
+
+    if is_rkisp_non_capture {
+        return false;
+    }
+
+    let mut maybe_capture = is_rkisp_capture;
     let capture_hints = [
         "capture",
         "hdmi",
@@ -1190,7 +1217,7 @@ fn sysfs_maybe_capture(path: &Path) -> bool {
     if capture_hints.iter().any(|hint| sysfs_name.contains(hint)) {
         maybe_capture = true;
     }
-    if let Some(driver) = &driver {
+    if let Some(driver) = driver {
         if driver.contains("uvcvideo")
             || driver.contains("tc358743")
             || driver.contains("rkcif")
@@ -1214,28 +1241,15 @@ fn sysfs_maybe_capture(path: &Path) -> bool {
         "mpp_",
         "rockchip-vpu",
     ];
-    if let Some(driver) = &driver {
+    if let Some(driver) = driver {
         if driver_skip.iter().any(|hint| driver.contains(hint)) {
             return false;
         }
     }
 
     let skip_hints = [
-        "codec",
-        "decoder",
-        "encoder",
-        "isp",
-        "mem2mem",
-        "m2m",
-        "vbi",
-        "radio",
-        "metadata",
+        "codec", "decoder", "encoder", "isp", "mem2mem", "m2m", "vbi", "radio", "metadata",
         "output",
-        // rkisp sub-nodes that are not video capture queues
-        "rkisp-statistics",
-        "rkisp-input-params",
-        "rkisp_rawrd",
-        "rkisp_rawwr",
     ];
     if skip_hints.iter().any(|hint| sysfs_name.contains(hint)) && !maybe_capture {
         return false;
@@ -1377,6 +1391,39 @@ mod tests {
         assert_eq!(res.width, 1920);
         assert_eq!(res.height, 1080);
         assert!(res.is_valid());
+    }
+
+    #[test]
+    fn sysfs_filter_keeps_rkisp_frame_capture_nodes() {
+        assert!(sysfs_identity_maybe_capture(
+            "rkisp1_mainpath",
+            Some("rkisp1")
+        ));
+        assert!(sysfs_identity_maybe_capture(
+            "rkisp1_selfpath",
+            Some("rkisp1")
+        ));
+        assert!(sysfs_identity_maybe_capture(
+            "rkisp_mainpath",
+            Some("rkisp1_v0")
+        ));
+    }
+
+    #[test]
+    fn sysfs_filter_rejects_rkisp_non_frame_nodes() {
+        for name in [
+            "rkisp1_stats",
+            "rkisp1_params",
+            "rkisp-statistics",
+            "rkisp-input-params",
+            "rkisp_rawrd0",
+            "rkisp_rawwr0",
+        ] {
+            assert!(
+                !sysfs_identity_maybe_capture(name, Some("rkisp1")),
+                "{name} must not be treated as a frame-capture node"
+            );
+        }
     }
 
     #[test]
