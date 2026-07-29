@@ -476,6 +476,8 @@ impl OtgNetworkConfigUpdate {
 pub struct MsdConfigUpdate {
     pub enabled: Option<bool>,
     pub msd_dir: Option<String>,
+    pub flash_inquiry_string: Option<String>,
+    pub cdrom_inquiry_string: Option<String>,
 }
 
 #[cfg(unix)]
@@ -492,6 +494,12 @@ impl MsdConfigUpdate {
                 ));
             }
         }
+        if let Some(ref value) = self.flash_inquiry_string {
+            MsdConfig::validate_inquiry_string("Flash", value)?;
+        }
+        if let Some(ref value) = self.cdrom_inquiry_string {
+            MsdConfig::validate_inquiry_string("CD-ROM", value)?;
+        }
         Ok(())
     }
 
@@ -501,6 +509,12 @@ impl MsdConfigUpdate {
         }
         if let Some(ref dir) = self.msd_dir {
             config.msd_dir = dir.trim().to_string();
+        }
+        if let Some(ref value) = self.flash_inquiry_string {
+            config.flash_inquiry_string = value.trim().to_string();
+        }
+        if let Some(ref value) = self.cdrom_inquiry_string {
+            config.cdrom_inquiry_string = value.trim().to_string();
         }
     }
 }

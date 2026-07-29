@@ -5,6 +5,7 @@ use tracing::{debug, info, warn};
 
 use super::configfs::{create_dir, create_symlink, remove_dir, remove_file, write_file};
 use super::function::GadgetFunction;
+use crate::config::{MsdConfig, DEFAULT_CDROM_INQUIRY_STRING, DEFAULT_FLASH_INQUIRY_STRING};
 use crate::error::{AppError, MsdErrorCode, Result};
 
 const MEDIA_TYPE_REBIND_DELAY_MS: u64 = 300;
@@ -56,14 +57,39 @@ impl MsdLunConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MsdInquiryStrings {
+    pub flash: String,
+    pub cdrom: String,
+}
+
+impl Default for MsdInquiryStrings {
+    fn default() -> Self {
+        Self {
+            flash: DEFAULT_FLASH_INQUIRY_STRING.to_string(),
+            cdrom: DEFAULT_CDROM_INQUIRY_STRING.to_string(),
+        }
+    }
+}
+
+impl From<&MsdConfig> for MsdInquiryStrings {
+    fn from(config: &MsdConfig) -> Self {
+        Self {
+            flash: config.flash_inquiry_string.clone(),
+            cdrom: config.cdrom_inquiry_string.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MsdFunction {
     name: String,
     lun_capacity: u8,
+    inquiry_strings: MsdInquiryStrings,
 }
 
 impl MsdFunction {
-    pub fn new(instance: u8, lun_capacity: u8) -> Result<Self> {
+    pub fn new(instance: u8, lun_capacity: u8, inquiry_strings: MsdInquiryStrings) -> Result<Self> {
         if lun_capacity != 1 && lun_capacity != 8 {
             return Err(AppError::BadRequest(format!(
                 "MSD LUN capacity must be 1 or 8, got {lun_capacity}"
@@ -73,6 +99,7 @@ impl MsdFunction {
         Ok(Self {
             name: format!("mass_storage.usb{}", instance),
             lun_capacity,
+            inquiry_strings,
         })
     }
 
@@ -212,6 +239,23 @@ impl MsdFunction {
         current_cdrom != if config.cdrom { "1" } else { "0" }
     }
 
+    fn inquiry_string_path(lun_path: &Path, cdrom: bool) -> Option<PathBuf> {
+        let cdrom_path = lun_path.join("inquiry_string_cdrom");
+        if cdrom && cdrom_path.exists() {
+            return Some(cdrom_path);
+        }
+        let generic_path = lun_path.join("inquiry_string");
+        generic_path.exists().then_some(generic_path)
+    }
+
+    fn inquiry_string(&self, cdrom: bool) -> &str {
+        if cdrom {
+            &self.inquiry_strings.cdrom
+        } else {
+            &self.inquiry_strings.flash
+        }
+    }
+
     fn configure_lun_attributes(
         &self,
         lun_path: &Path,
@@ -256,6 +300,7 @@ impl MsdFunction {
                 lun, current_cdrom, new_cdrom
             );
             write_file(&lun_path.join("cdrom"), new_cdrom)?;
+            self.write_inquiry_string(lun_path, config.cdrom)?;
         }
         if current_ro != new_ro {
             debug!("Updating LUN {} ro: {} -> {}", lun, current_ro, new_ro);
@@ -317,6 +362,26 @@ impl MsdFunction {
             warn!("LUN {} file does not exist: {}", lun, config.file.display());
         }
 
+        Ok(())
+    }
+
+    fn write_inquiry_string(&self, lun_path: &Path, cdrom: bool) -> Result<()> {
+        if let Some(path) = Self::inquiry_string_path(lun_path, cdrom) {
+            write_file(&path, self.inquiry_string(cdrom))?;
+        }
+        Ok(())
+    }
+
+    fn write_inquiry_strings(&self, lun_path: &Path) -> Result<()> {
+        let generic_path = lun_path.join("inquiry_string");
+        if generic_path.exists() {
+            write_file(&generic_path, &self.inquiry_strings.flash)?;
+        }
+
+        let cdrom_path = lun_path.join("inquiry_string_cdrom");
+        if cdrom_path.exists() {
+            write_file(&cdrom_path, &self.inquiry_strings.cdrom)?;
+        }
         Ok(())
     }
 
@@ -455,6 +520,7 @@ impl GadgetFunction for MsdFunction {
 
         for lun in 0..self.lun_capacity {
             self.clear_lun_unbound(gadget_path, lun)?;
+            self.write_inquiry_strings(&self.lun_path(gadget_path, lun))?;
         }
 
         debug!("Created MSD function: {}", self.name());
@@ -526,6 +592,10 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn test_msd(capacity: u8) -> MsdFunction {
+        MsdFunction::new(0, capacity, MsdInquiryStrings::default()).unwrap()
+    }
+
     #[test]
     fn test_lun_config_cdrom() {
         let config = MsdLunConfig::cdrom(PathBuf::from("/tmp/test.iso"));
@@ -543,20 +613,61 @@ mod tests {
     }
 
     #[test]
+    fn inquiry_string_uses_cdrom_attribute_with_stock_fallback() {
+        let msd = MsdFunction::new(
+            0,
+            1,
+            MsdInquiryStrings {
+                flash: "Custom Flash".into(),
+                cdrom: "Custom Optical".into(),
+            },
+        )
+        .unwrap();
+        let patched = TempDir::new().unwrap();
+        std::fs::write(patched.path().join("inquiry_string"), b"generic\n").unwrap();
+        std::fs::write(patched.path().join("inquiry_string_cdrom"), b"cdrom\n").unwrap();
+
+        msd.write_inquiry_strings(patched.path()).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(patched.path().join("inquiry_string_cdrom"))
+                .unwrap()
+                .trim(),
+            "Custom Optical"
+        );
+        assert_eq!(
+            std::fs::read_to_string(patched.path().join("inquiry_string"))
+                .unwrap()
+                .trim(),
+            "Custom Flash"
+        );
+
+        let stock = TempDir::new().unwrap();
+        std::fs::write(stock.path().join("inquiry_string"), b"generic\n").unwrap();
+        msd.write_inquiry_string(stock.path(), true).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(stock.path().join("inquiry_string"))
+                .unwrap()
+                .trim(),
+            "Custom Optical"
+        );
+    }
+
+    #[test]
     fn test_msd_function_name() {
-        let msd = MsdFunction::new(0, 1).unwrap();
+        let msd = test_msd(1);
         assert_eq!(msd.name(), "mass_storage.usb0");
         assert_eq!(msd.lun_capacity, 1);
 
-        let multi = MsdFunction::new(0, 8).unwrap();
+        let multi = test_msd(8);
         assert_eq!(multi.lun_capacity, 8);
     }
 
     #[test]
     fn test_msd_function_rejects_invalid_capacity() {
-        assert!(MsdFunction::new(0, 0).is_err());
-        assert!(MsdFunction::new(0, 2).is_err());
-        assert!(MsdFunction::new(0, 9).is_err());
+        assert!(MsdFunction::new(0, 0, MsdInquiryStrings::default()).is_err());
+        assert!(MsdFunction::new(0, 2, MsdInquiryStrings::default()).is_err());
+        assert!(MsdFunction::new(0, 9, MsdInquiryStrings::default()).is_err());
     }
 
     #[test]
@@ -575,7 +686,7 @@ mod tests {
         std::fs::create_dir_all(&lun_path).unwrap();
         std::fs::write(lun_path.join("file"), b"backing.img\n").unwrap();
         std::fs::write(lun_path.join("forced_eject"), b"0\n").unwrap();
-        let msd = MsdFunction::new(0, 1).unwrap();
+        let msd = test_msd(1);
 
         msd.disconnect_lun(temp_dir.path(), 0).unwrap();
 
@@ -595,7 +706,7 @@ mod tests {
         let lun_path = temp_dir.path().join("functions/mass_storage.usb0/lun.0");
         std::fs::create_dir_all(&lun_path).unwrap();
         std::fs::write(lun_path.join("file"), b"backing.img\n").unwrap();
-        let msd = MsdFunction::new(0, 1).unwrap();
+        let msd = test_msd(1);
 
         msd.disconnect_lun(temp_dir.path(), 0).unwrap();
 
@@ -610,7 +721,7 @@ mod tests {
         let lun_path = temp_dir.path().join("functions/mass_storage.usb0/lun.0");
         std::fs::create_dir_all(lun_path.join("forced_eject")).unwrap();
         std::fs::write(lun_path.join("file"), b"backing.img\n").unwrap();
-        let msd = MsdFunction::new(0, 1).unwrap();
+        let msd = test_msd(1);
 
         msd.disconnect_lun(temp_dir.path(), 0).unwrap();
 
@@ -629,7 +740,7 @@ mod tests {
             std::fs::write(lun_path.join("file"), format!("backing-{lun}.img\n")).unwrap();
             std::fs::write(lun_path.join("forced_eject"), b"0\n").unwrap();
         }
-        let msd = MsdFunction::new(0, 8).unwrap();
+        let msd = test_msd(8);
 
         msd.disconnect_lun(temp_dir.path(), 1).unwrap();
 
@@ -656,7 +767,7 @@ mod tests {
         for capacity in [1, 8] {
             let temp_dir = TempDir::new().unwrap();
             std::fs::create_dir_all(temp_dir.path().join("functions")).unwrap();
-            let msd = MsdFunction::new(0, capacity).unwrap();
+            let msd = test_msd(capacity);
 
             msd.create(temp_dir.path()).unwrap();
 
@@ -678,7 +789,7 @@ mod tests {
         std::fs::write(temp_dir.path().join("UDC"), b"test.udc\n").unwrap();
         let image_path = temp_dir.path().join("test.img");
         std::fs::write(&image_path, b"image").unwrap();
-        let msd = MsdFunction::new(0, 1).unwrap();
+        let msd = test_msd(1);
 
         msd.configure_lun(temp_dir.path(), 0, &MsdLunConfig::disk(image_path, false))
             .unwrap();
@@ -711,7 +822,7 @@ mod tests {
         std::fs::write(temp_dir.path().join("UDC"), b"test.udc\n").unwrap();
         let image_path = temp_dir.path().join("test.iso");
         std::fs::write(&image_path, b"iso").unwrap();
-        let msd = MsdFunction::new(0, 1).unwrap();
+        let msd = test_msd(1);
 
         msd.configure_lun(temp_dir.path(), 0, &MsdLunConfig::cdrom(image_path.clone()))
             .unwrap();
@@ -751,7 +862,7 @@ mod tests {
         std::fs::write(temp_dir.path().join("UDC"), b"test.udc\n").unwrap();
         let image_path = temp_dir.path().join("test.iso");
         std::fs::write(&image_path, b"iso").unwrap();
-        let msd = MsdFunction::new(0, 1).unwrap();
+        let msd = test_msd(1);
 
         assert!(msd
             .configure_lun(temp_dir.path(), 0, &MsdLunConfig::cdrom(image_path),)
@@ -771,7 +882,7 @@ mod tests {
         for lun in 1..8 {
             std::fs::create_dir_all(func_path.join(format!("lun.{lun}"))).unwrap();
         }
-        let msd = MsdFunction::new(0, 1).unwrap();
+        let msd = test_msd(1);
 
         msd.cleanup(temp_dir.path()).unwrap();
 
@@ -788,7 +899,7 @@ mod tests {
             std::fs::write(lun_path.join("file"), format!("backing-{lun}.img\n")).unwrap();
             std::fs::write(lun_path.join("forced_eject"), b"0\n").unwrap();
         }
-        let msd = MsdFunction::new(0, 1).unwrap();
+        let msd = test_msd(1);
 
         // Ordinary files do not disappear with configfs groups, so cleanup is
         // expected to report directory-removal failures in this test fixture.
@@ -809,7 +920,7 @@ mod tests {
         for lun in 0..2 {
             std::fs::create_dir_all(func_path.join(format!("lun.{lun}"))).unwrap();
         }
-        let msd = MsdFunction::new(0, 1).unwrap();
+        let msd = test_msd(1);
 
         let error = msd.cleanup(temp_dir.path()).unwrap_err();
 

@@ -106,6 +106,16 @@ pub fn write_file(path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
+/// Write an optional configfs/sysfs attribute when the running kernel exposes it.
+/// This keeps newer kernel enhancements compatible with older kernels.
+pub fn write_file_if_exists(path: &Path, content: &str) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    write_file(path, content)?;
+    Ok(true)
+}
+
 pub fn write_bytes(path: &Path, data: &[u8]) -> Result<()> {
     let mut file = File::create(path)
         .map_err(|e| AppError::Internal(format!("Failed to create {}: {}", path.display(), e)))?;

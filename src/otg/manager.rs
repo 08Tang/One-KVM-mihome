@@ -4,12 +4,12 @@ use tracing::{debug, error, info, warn};
 
 use super::configfs::{
     configfs_path, create_dir, create_symlink, find_udc, is_configfs_available, remove_dir,
-    remove_file, write_file, DEFAULT_GADGET_NAME, DEFAULT_USB_BCD_DEVICE, DEFAULT_USB_PRODUCT_ID,
-    DEFAULT_USB_VENDOR_ID, USB_BCD_USB,
+    remove_file, write_file, write_file_if_exists, DEFAULT_GADGET_NAME, DEFAULT_USB_BCD_DEVICE,
+    DEFAULT_USB_PRODUCT_ID, DEFAULT_USB_VENDOR_ID, USB_BCD_USB,
 };
 use super::function::GadgetFunction;
 use super::hid::HidFunction;
-use super::msd::MsdFunction;
+use super::msd::{MsdFunction, MsdInquiryStrings};
 use super::network::NetworkFunction;
 use crate::config::OtgNetworkConfig;
 use crate::error::{AppError, Result};
@@ -134,8 +134,12 @@ impl OtgGadgetManager {
         Ok(device_path)
     }
 
-    pub fn add_msd(&mut self, lun_capacity: u8) -> Result<MsdFunction> {
-        let func = MsdFunction::new(self.msd_instance, lun_capacity)?;
+    pub fn add_msd(
+        &mut self,
+        lun_capacity: u8,
+        inquiry_strings: MsdInquiryStrings,
+    ) -> Result<MsdFunction> {
+        let func = MsdFunction::new(self.msd_instance, lun_capacity, inquiry_strings)?;
         let func_clone = func.clone();
         self.add_function(Box::new(func))?;
         self.msd_instance += 1;
@@ -194,6 +198,22 @@ impl OtgGadgetManager {
         for func in &self.functions {
             func.create(&self.gadget_path)?;
             func.link(&self.config_path, &self.gadget_path)?;
+        }
+
+        // A host only enables USB remote wakeup when the configuration
+        // descriptor advertises it. Enable the descriptor bit only when the
+        // running kernel supports the HID wakeup_on_write attribute.
+        let hid_wakeup_supported = self.functions.iter().any(|func| {
+            func.name().starts_with("hid.")
+                && self
+                    .gadget_path
+                    .join("functions")
+                    .join(func.name())
+                    .join("wakeup_on_write")
+                    .exists()
+        });
+        if hid_wakeup_supported {
+            let _ = write_file_if_exists(&self.config_path.join("bmAttributes"), "0xA0")?;
         }
 
         debug!("OTG USB Gadget setup complete");

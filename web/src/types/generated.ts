@@ -86,6 +86,8 @@ export interface OtgNetworkConfig {
 export interface MsdConfig {
 	enabled: boolean;
 	msd_dir: string;
+	flash_inquiry_string: string;
+	cdrom_inquiry_string: string;
 }
 
 export enum AtxDriverType {
@@ -546,6 +548,8 @@ export interface HidConfigUpdate {
 export interface MsdConfigUpdate {
 	enabled?: boolean;
 	msd_dir?: string;
+	flash_inquiry_string?: string;
+	cdrom_inquiry_string?: string;
 }
 
 export interface NetworkInterfaceInfo {

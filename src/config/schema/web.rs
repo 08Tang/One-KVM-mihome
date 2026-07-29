@@ -49,18 +49,51 @@ impl Default for VideoConfig {
 pub struct MsdConfig {
     pub enabled: bool,
     pub msd_dir: String,
+    pub flash_inquiry_string: String,
+    pub cdrom_inquiry_string: String,
 }
+
+pub const DEFAULT_FLASH_INQUIRY_STRING: &str = "One-KVM Virtual Flash";
+pub const DEFAULT_CDROM_INQUIRY_STRING: &str = "One-KVM Virtual CD-ROM";
+pub const MAX_INQUIRY_STRING_BYTES: usize = 28;
 
 impl Default for MsdConfig {
     fn default() -> Self {
         Self {
             enabled: true,
             msd_dir: String::new(),
+            flash_inquiry_string: DEFAULT_FLASH_INQUIRY_STRING.to_string(),
+            cdrom_inquiry_string: DEFAULT_CDROM_INQUIRY_STRING.to_string(),
         }
     }
 }
 
 impl MsdConfig {
+    pub fn validate(&self) -> crate::error::Result<()> {
+        Self::validate_inquiry_string("Flash", &self.flash_inquiry_string)?;
+        Self::validate_inquiry_string("CD-ROM", &self.cdrom_inquiry_string)
+    }
+
+    pub fn validate_inquiry_string(kind: &str, value: &str) -> crate::error::Result<()> {
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(crate::error::AppError::BadRequest(format!(
+                "MSD {kind} inquiry string cannot be empty"
+            )));
+        }
+        if value.len() > MAX_INQUIRY_STRING_BYTES {
+            return Err(crate::error::AppError::BadRequest(format!(
+                "MSD {kind} inquiry string must be at most {MAX_INQUIRY_STRING_BYTES} bytes"
+            )));
+        }
+        if !value.bytes().all(|byte| (0x20..=0x7e).contains(&byte)) {
+            return Err(crate::error::AppError::BadRequest(format!(
+                "MSD {kind} inquiry string must contain printable ASCII characters only"
+            )));
+        }
+        Ok(())
+    }
+
     pub fn msd_dir_path(&self) -> std::path::PathBuf {
         std::path::PathBuf::from(&self.msd_dir)
     }
@@ -121,5 +154,20 @@ impl Default for WebConfig {
             ssl_cert_path: None,
             ssl_key_path: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn msd_inquiry_strings_default_and_validate() {
+        assert!(MsdConfig::default().validate().is_ok());
+        assert!(MsdConfig::validate_inquiry_string("Flash", "  Custom Drive  ").is_ok());
+        assert!(MsdConfig::validate_inquiry_string("Flash", "").is_err());
+        assert!(MsdConfig::validate_inquiry_string("Flash", &"x".repeat(29)).is_err());
+        assert!(MsdConfig::validate_inquiry_string("CD-ROM", "虚拟光驱").is_err());
+        assert!(MsdConfig::validate_inquiry_string("CD-ROM", "bad\tname").is_err());
     }
 }

@@ -6,7 +6,7 @@ use typeshare::typeshare;
 
 use super::bridge::NetworkBridgeRuntime;
 use super::manager::{wait_for_hid_devices, GadgetDescriptor, OtgGadgetManager};
-use super::msd::{MsdFunction, MsdLunConfig};
+use super::msd::{MsdFunction, MsdInquiryStrings, MsdLunConfig};
 use crate::config::{
     HidBackend, HidConfig, MsdConfig, OtgDescriptorConfig, OtgHidFunctions, OtgNetworkConfig,
     UacConfig,
@@ -62,6 +62,7 @@ pub(crate) struct OtgDesiredState {
     pub keyboard_leds: bool,
     pub msd_enabled: bool,
     pub msd_lun_capacity: u8,
+    pub msd_inquiry_strings: MsdInquiryStrings,
     pub network: OtgNetworkConfig,
     pub uac: UacConfig,
 }
@@ -75,6 +76,7 @@ impl Default for OtgDesiredState {
             keyboard_leds: false,
             msd_enabled: false,
             msd_lun_capacity: 1,
+            msd_inquiry_strings: MsdInquiryStrings::default(),
             network: OtgNetworkConfig::default(),
             uac: UacConfig::default(),
         }
@@ -90,6 +92,7 @@ impl OtgDesiredState {
     ) -> Result<Self> {
         network.validate()?;
         uac.validate()?;
+        msd.validate()?;
         let hid_functions = if hid.backend == HidBackend::Otg {
             let functions = hid.constrained_otg_functions();
             Some(functions)
@@ -115,6 +118,7 @@ impl OtgDesiredState {
             keyboard_leds: hid.effective_otg_keyboard_leds(),
             msd_enabled: msd.enabled,
             msd_lun_capacity: 1,
+            msd_inquiry_strings: MsdInquiryStrings::from(msd),
             network: network.clone(),
             uac: if uac.enabled {
                 uac.clone()
@@ -142,6 +146,7 @@ struct OtgServiceState {
     pub hid_enabled: bool,
     pub msd_enabled: bool,
     pub msd_lun_capacity: u8,
+    pub msd_inquiry_strings: MsdInquiryStrings,
     pub network: OtgNetworkConfig,
     pub uac: UacConfig,
     pub configured_udc: Option<String>,
@@ -160,6 +165,7 @@ impl Default for OtgServiceState {
             hid_enabled: false,
             msd_enabled: false,
             msd_lun_capacity: 1,
+            msd_inquiry_strings: MsdInquiryStrings::default(),
             network: OtgNetworkConfig::default(),
             uac: UacConfig::default(),
             configured_udc: None,
@@ -355,6 +361,7 @@ impl OtgService {
                 && state.hid_enabled == desired.hid_enabled()
                 && state.msd_enabled == desired.msd_enabled
                 && state.msd_lun_capacity == desired.msd_lun_capacity
+                && state.msd_inquiry_strings == desired.msd_inquiry_strings
                 && state.network == desired.network
                 && state.uac == desired.uac
                 && state.configured_udc == desired.udc
@@ -395,6 +402,7 @@ impl OtgService {
             state.hid_enabled = false;
             state.msd_enabled = false;
             state.msd_lun_capacity = 1;
+            state.msd_inquiry_strings = MsdInquiryStrings::default();
             state.network = OtgNetworkConfig::default();
             state.uac = UacConfig::default();
             state.configured_udc = None;
@@ -505,7 +513,10 @@ impl OtgService {
         }
 
         let msd_func = if desired.msd_enabled {
-            match manager.add_msd(desired.msd_lun_capacity) {
+            match manager.add_msd(
+                desired.msd_lun_capacity,
+                desired.msd_inquiry_strings.clone(),
+            ) {
                 Ok(func) => {
                     debug!("MSD function added to gadget");
                     Some(func)
@@ -592,6 +603,7 @@ impl OtgService {
             state.hid_enabled = desired.hid_enabled();
             state.msd_enabled = desired.msd_enabled;
             state.msd_lun_capacity = desired.msd_lun_capacity;
+            state.msd_inquiry_strings = desired.msd_inquiry_strings.clone();
             state.network = desired.network.clone();
             state.uac = desired.uac.clone();
             state.configured_udc = Some(udc);
@@ -713,6 +725,14 @@ mod tests {
         let mut multi = single.clone();
         multi.msd_lun_capacity = 8;
         assert_ne!(single, multi);
+    }
+
+    #[test]
+    fn inquiry_strings_participate_in_desired_state_equality() {
+        let original = OtgDesiredState::default();
+        let mut changed = original.clone();
+        changed.msd_inquiry_strings.flash = "Custom Flash".to_string();
+        assert_ne!(original, changed);
     }
 
     #[test]

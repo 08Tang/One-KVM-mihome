@@ -277,6 +277,9 @@ pub async fn apply_msd_config(
     let old_msd_enabled = old_config.enabled;
     let new_msd_enabled = effective_new_msd_enabled;
     let msd_dir_changed = old_config.msd_dir != new_config.msd_dir;
+    let inquiry_strings_changed = old_config.flash_inquiry_string
+        != new_config.flash_inquiry_string
+        || old_config.cdrom_inquiry_string != new_config.cdrom_inquiry_string;
 
     tracing::info!(
         "MSD enabled: old={}, new={}",
@@ -285,6 +288,9 @@ pub async fn apply_msd_config(
     );
     if msd_dir_changed {
         tracing::info!("MSD directory changed: {}", new_config.msd_dir);
+    }
+    if inquiry_strings_changed {
+        tracing::info!("MSD inquiry strings changed");
     }
 
     let msd_dir = new_config.msd_dir_path();
@@ -295,12 +301,12 @@ pub async fn apply_msd_config(
         tracing::warn!("Failed to create MSD ventoy directory: {}", e);
     }
 
-    let needs_reload = options.force || old_msd_enabled != new_msd_enabled || msd_dir_changed;
+    let needs_reload = options.force
+        || old_msd_enabled != new_msd_enabled
+        || msd_dir_changed
+        || inquiry_strings_changed;
     if !needs_reload {
-        tracing::info!(
-            "MSD enabled state unchanged ({}) and directory unchanged, no reload needed",
-            new_msd_enabled
-        );
+        tracing::info!("MSD configuration unchanged, no reload needed");
         return Ok(());
     }
 

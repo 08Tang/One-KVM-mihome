@@ -675,6 +675,8 @@ const config = ref({
   hid_ch9329_hybrid_mouse: false,
   msd_enabled: false,
   msd_dir: '',
+  msd_flash_inquiry_string: 'One-KVM Virtual Flash',
+  msd_cdrom_inquiry_string: 'One-KVM Virtual CD-ROM',
   otg_network_enabled: false,
   otg_network_driver: 'ncm' as 'ncm' | 'ecm' | 'rndis',
   otg_network_interface: '',
@@ -1013,6 +1015,18 @@ const isHidFunctionSelectionValid = computed(() => {
   return !!(f.keyboard || f.mouse_relative || f.mouse_absolute || f.consumer)
 })
 
+function isValidInquiryString(value: string): boolean {
+  return /^[\x20-\x7e]{1,28}$/.test(value.trim())
+}
+
+const areMsdInquiryStringsValid = computed(() =>
+  !config.value.msd_enabled
+  || (
+    isValidInquiryString(config.value.msd_flash_inquiry_string)
+    && isValidInquiryString(config.value.msd_cdrom_inquiry_string)
+  )
+)
+
 const otgVendorIdHex = ref('1d6b')
 const otgProductIdHex = ref('0104')
 const otgManufacturer = ref('One-KVM')
@@ -1144,6 +1158,7 @@ const isCh9329DescriptorDirty = computed(() => {
 const isHidSettingsValid = computed(() =>
   isHidFunctionSelectionValid.value
   && isCh9329DescriptorValid.value
+  && areMsdInquiryStringsValid.value
 )
 
 watch(bindMode, (mode) => {
@@ -1471,6 +1486,8 @@ async function saveConfig() {
         msd: {
           enabled: otgEnabled && config.value.msd_enabled,
           msd_dir: config.value.msd_dir || undefined,
+          flash_inquiry_string: config.value.msd_flash_inquiry_string,
+          cdrom_inquiry_string: config.value.msd_cdrom_inquiry_string,
         },
         network: {
           enabled: otgEnabled && config.value.otg_network_enabled,
@@ -1541,6 +1558,8 @@ async function loadConfig() {
       hid_ch9329_hybrid_mouse: hid.ch9329_hybrid_mouse ?? false,
       msd_enabled: msd.enabled || false,
       msd_dir: msd.msd_dir || '',
+      msd_flash_inquiry_string: msd.flash_inquiry_string || 'One-KVM Virtual Flash',
+      msd_cdrom_inquiry_string: msd.cdrom_inquiry_string || 'One-KVM Virtual CD-ROM',
       otg_network_enabled: otgNetwork.enabled,
       otg_network_driver: otgNetwork.driver_mode,
       uac_enabled: uac.enabled,
@@ -3299,41 +3318,48 @@ watch(isWindows, () => {
                       <h4 class="text-sm font-medium">{{ t('settings.otgHidProfile') }}</h4>
                     </div>
                     <div class="space-y-3">
-                      <div class="space-y-3 rounded-md border border-border/60 p-3">
-                        <div class="flex items-center justify-between gap-4">
-                          <div>
-                            <Label>{{ t('settings.otgFunctionMouseRelative') }}</Label>
+                      <div class="grid gap-3 md:grid-cols-2">
+                        <div class="space-y-3 rounded-md border border-border/60 p-3">
+                          <div class="flex items-center justify-between gap-4">
+                            <div>
+                              <Label>{{ t('settings.otgFunctionKeyboard') }}</Label>
+                            </div>
+                            <Switch v-model="config.hid_otg_functions.keyboard" />
                           </div>
-                          <Switch v-model="config.hid_otg_functions.mouse_relative" />
+                          <Separator />
+                          <div class="flex items-center justify-between gap-4">
+                            <div>
+                              <Label>{{ t('settings.otgFunctionConsumer') }}</Label>
+                            </div>
+                            <Switch v-model="config.hid_otg_functions.consumer" />
+                          </div>
+                          <Separator />
+                          <div class="flex items-center justify-between gap-4">
+                            <div>
+                              <Label>{{ t('settings.otgKeyboardLeds') }}</Label>
+                            </div>
+                            <Switch v-model="config.hid_otg_keyboard_leds" :disabled="isKeyboardLedToggleDisabled" />
+                          </div>
                         </div>
-                        <Separator />
-                        <div class="flex items-center justify-between gap-4">
-                          <div>
-                            <Label>{{ t('settings.otgFunctionMouseAbsolute') }}</Label>
+                        <div class="space-y-3 rounded-md border border-border/60 p-3">
+                          <div class="flex items-center justify-between gap-4">
+                            <div>
+                              <Label>{{ t('settings.otgFunctionMouseRelative') }}</Label>
+                            </div>
+                            <Switch v-model="config.hid_otg_functions.mouse_relative" />
                           </div>
-                          <Switch v-model="config.hid_otg_functions.mouse_absolute" />
-                        </div>
-                      </div>
-                      <div class="space-y-3 rounded-md border border-border/60 p-3">
-                        <div class="flex items-center justify-between gap-4">
-                          <div>
-                            <Label>{{ t('settings.otgFunctionKeyboard') }}</Label>
+                          <Separator />
+                          <div class="flex items-center justify-between gap-4">
+                            <div>
+                              <Label>{{ t('settings.otgFunctionMouseAbsolute') }}</Label>
+                            </div>
+                            <Switch v-model="config.hid_otg_functions.mouse_absolute" />
                           </div>
-                          <Switch v-model="config.hid_otg_functions.keyboard" />
-                        </div>
-                        <Separator />
-                        <div class="flex items-center justify-between gap-4">
-                          <div>
-                            <Label>{{ t('settings.otgFunctionConsumer') }}</Label>
+                          <Separator />
+                          <div class="flex items-center justify-between gap-4">
+                            <Label>{{ t('settings.uacMic') }}</Label>
+                            <Switch v-model="config.uac_enabled" />
                           </div>
-                          <Switch v-model="config.hid_otg_functions.consumer" />
-                        </div>
-                        <Separator />
-                        <div class="flex items-center justify-between gap-4">
-                          <div>
-                            <Label>{{ t('settings.otgKeyboardLeds') }}</Label>
-                          </div>
-                          <Switch v-model="config.hid_otg_keyboard_leds" :disabled="isKeyboardLedToggleDisabled" />
                         </div>
                       </div>
                       <div class="space-y-3 rounded-md border border-border/60 p-3">
@@ -3348,6 +3374,24 @@ watch(isWindows, () => {
                           <div class="space-y-2">
                             <Label for="msd-dir">{{ t('settings.msdDir') }}</Label>
                             <Input id="msd-dir" v-model="config.msd_dir" placeholder="/etc/one-kvm/msd" />
+                          </div>
+                          <div class="space-y-2">
+                            <Label for="msd-flash-inquiry-string">{{ t('settings.msdFlashInquiryString') }}</Label>
+                            <Input
+                              id="msd-flash-inquiry-string"
+                              v-model="config.msd_flash_inquiry_string"
+                              placeholder="One-KVM Virtual Flash"
+                              maxlength="28"
+                            />
+                          </div>
+                          <div class="space-y-2">
+                            <Label for="msd-cdrom-inquiry-string">{{ t('settings.msdCdromInquiryString') }}</Label>
+                            <Input
+                              id="msd-cdrom-inquiry-string"
+                              v-model="config.msd_cdrom_inquiry_string"
+                              placeholder="One-KVM Virtual CD-ROM"
+                              maxlength="28"
+                            />
                           </div>
                         </template>
                       </div>
@@ -3411,12 +3455,6 @@ watch(isWindows, () => {
                         <p v-if="otgNetworkStatus?.health === 'degraded'" class="text-xs text-destructive">
                           {{ t('settings.otgRuntimeDegraded') }}: {{ otgNetworkStatus.error || t('common.error') }}
                         </p>
-                      </div>
-                      <div class="space-y-3 rounded-md border border-border/60 p-3">
-                        <div class="flex items-center justify-between gap-4">
-                          <Label>{{ t('settings.uacMic') }}</Label>
-                          <Switch v-model="config.uac_enabled" />
-                        </div>
                       </div>
                     </div>
                     <p class="text-xs text-warning">
