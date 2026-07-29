@@ -10,6 +10,7 @@ import { useConsoleEvents } from '@/composables/useConsoleEvents'
 import { useHidWebSocket } from '@/composables/useHidWebSocket'
 import { useWebRTC } from '@/composables/useWebRTC'
 import { useVideoSession } from '@/composables/useVideoSession'
+import { useVideoScaling } from '@/composables/useVideoScaling'
 import { useComputerUseSocket, type ComputerUseServerMessage } from '@/composables/useComputerUseSocket'
 import { useFeatureVisibility } from '@/composables/useFeatureVisibility'
 import { useTheme } from '@/composables/useTheme'
@@ -121,7 +122,17 @@ const streamSignalState = ref<StreamSignalState>('ok')
 const streamSignalReason = ref<string | null>(null)
 const streamNextRetryMs = ref<number | null>(null)
 
-const videoAspectRatio = ref<string | null>(null)
+const {
+  workspaceRef: videoWorkspaceRef,
+  scaleMode: videoScaleMode,
+  sourceSize: videoSourceSize,
+  sourceSizeAvailable,
+  stageClass: videoStageClass,
+  containerStyle: videoContainerStyle,
+  updateSourceSize: updateVideoSourceSize,
+  clearSourceSize: clearVideoSourceSize,
+  setScaleMode: setVideoScaleMode,
+} = useVideoScaling()
 
 const backendFps = ref(0)
 
@@ -691,22 +702,15 @@ const connectProgress = computed<{ current: number; total: number } | null>(() =
   }
 })
 
-const videoContainerStyle = computed(() => {
-  if (!videoAspectRatio.value) {
-    return {
-      width: '100%',
-      height: '100%',
-      maxWidth: '100%',
-      maxHeight: '100%',
-      minHeight: '120px',
-    }
-  }
-  return {
-    aspectRatio: videoAspectRatio.value,
-    maxWidth: '100%',
-    maxHeight: '100%',
-    minHeight: '120px',
-  }
+function handleWebRTCVideoResize() {
+  if (videoMode.value === 'mjpeg') return
+  const video = webrtcVideoRef.value
+  if (!video) return
+  updateVideoSourceSize(video.videoWidth, video.videoHeight)
+}
+
+watch(videoLoading, (loading) => {
+  if (loading) clearVideoSourceSize()
 })
 
 const computerUsePanelVisible = computed(() => computerUseOpen.value && !isFullscreen.value)
@@ -1015,7 +1019,7 @@ function handleVideoLoad() {
     systemStore.setStreamOnline(true)
     const img = videoRef.value
     if (img && img.naturalWidth && img.naturalHeight) {
-      videoAspectRatio.value = `${img.naturalWidth}/${img.naturalHeight}`
+      updateVideoSourceSize(img.naturalWidth, img.naturalHeight)
     }
   }
 
@@ -1707,6 +1711,7 @@ async function rebindWebRTCVideo() {
       } catch {
       }
       await waitForVideoFirstFrame(webrtcVideoRef.value, 2000)
+      handleWebRTCVideoResize()
       clearFrameOverlay()
     }
   }
@@ -1968,9 +1973,6 @@ watch(webrtc.stats, (stats) => {
   if (videoMode.value !== 'mjpeg' && stats.framesPerSecond > 0) {
     backendFps.value = Math.round(stats.framesPerSecond)
     systemStore.setStreamOnline(true)
-    if (stats.frameWidth && stats.frameHeight) {
-      videoAspectRatio.value = `${stats.frameWidth}/${stats.frameHeight}`
-    }
   }
 }, { deep: true })
 
@@ -2052,9 +2054,9 @@ watch(() => webrtc.state.value, (newState, oldState) => {
 })
 
 async function toggleFullscreen() {
-  if (!videoContainerRef.value) return
+  if (!videoWorkspaceRef.value) return
   if (!document.fullscreenElement) {
-    await videoContainerRef.value.requestFullscreen()
+    await videoWorkspaceRef.value.requestFullscreen()
     isFullscreen.value = true
   } else {
     await document.exitFullscreen()
@@ -2253,10 +2255,8 @@ function getActiveVideoAspectRatio(): number | null {
     }
   }
 
-  if (!videoAspectRatio.value) return null
-  const [width, height] = videoAspectRatio.value.split('/').map(Number)
-  if (!width || !height) return null
-  return width / height
+  const source = videoSourceSize.value
+  return source ? source.width / source.height : null
 }
 
 function getRenderedVideoRect() {
@@ -2308,6 +2308,20 @@ function getAbsoluteMousePosition(e: MouseEvent) {
   }
 }
 
+function getLocalRenderedVideoBounds() {
+  const container = videoContainerRef.value
+  const renderedRect = getRenderedVideoRect()
+  if (!container || !renderedRect) return null
+
+  const containerRect = container.getBoundingClientRect()
+  return {
+    left: renderedRect.left - containerRect.left,
+    top: renderedRect.top - containerRect.top,
+    right: renderedRect.left - containerRect.left + renderedRect.width,
+    bottom: renderedRect.top - containerRect.top + renderedRect.height,
+  }
+}
+
 function updateLocalCrosshairFromEvent(e: MouseEvent) {
   if (!cursorVisible.value) {
     localCrosshairPos.value = null
@@ -2317,7 +2331,8 @@ function updateLocalCrosshairFromEvent(e: MouseEvent) {
   if (!container) return
 
   const rect = container.getBoundingClientRect()
-  if (rect.width <= 0 || rect.height <= 0) return
+  const bounds = getLocalRenderedVideoBounds()
+  if (rect.width <= 0 || rect.height <= 0 || !bounds) return
 
   if (mouseMode.value === 'relative' && isPointerLocked.value) {
     updateLocalCrosshairByDelta(e.movementX, e.movementY)
@@ -2325,8 +2340,8 @@ function updateLocalCrosshairFromEvent(e: MouseEvent) {
   }
 
   localCrosshairPos.value = {
-    x: Math.max(0, Math.min(rect.width, e.clientX - rect.left)),
-    y: Math.max(0, Math.min(rect.height, e.clientY - rect.top)),
+    x: Math.max(bounds.left, Math.min(bounds.right, e.clientX - rect.left)),
+    y: Math.max(bounds.top, Math.min(bounds.bottom, e.clientY - rect.top)),
   }
 }
 
@@ -2339,13 +2354,16 @@ function updateLocalCrosshairByDelta(dx: number, dy: number) {
   const container = videoContainerRef.value
   if (!container) return
 
-  const rect = container.getBoundingClientRect()
-  if (rect.width <= 0 || rect.height <= 0) return
+  const bounds = getLocalRenderedVideoBounds()
+  if (!bounds) return
 
-  const current = localCrosshairPos.value ?? { x: rect.width / 2, y: rect.height / 2 }
+  const current = localCrosshairPos.value ?? {
+    x: (bounds.left + bounds.right) / 2,
+    y: (bounds.top + bounds.bottom) / 2,
+  }
   localCrosshairPos.value = {
-    x: Math.max(0, Math.min(rect.width, current.x + dx)),
-    y: Math.max(0, Math.min(rect.height, current.y + dy)),
+    x: Math.max(bounds.left, Math.min(bounds.right, current.x + dx)),
+    y: Math.max(bounds.top, Math.min(bounds.bottom, current.y + dy)),
   }
 }
 
@@ -2821,9 +2839,12 @@ function handlePointerLockChange() {
   if (isPointerLocked.value) {
     mousePosition.value = { x: 0, y: 0 }
     if (cursorVisible.value && container) {
-      const r = container.getBoundingClientRect()
-      if (r.width > 0 && r.height > 0) {
-        localCrosshairPos.value = { x: r.width / 2, y: r.height / 2 }
+      const bounds = getLocalRenderedVideoBounds()
+      if (bounds) {
+        localCrosshairPos.value = {
+          x: (bounds.left + bounds.right) / 2,
+          y: (bounds.top + bounds.bottom) / 2,
+        }
       }
     }
   }
@@ -3217,7 +3238,10 @@ onUnmounted(() => {
       :show-computer-use="showComputerUse"
       :show-paste-text="showPasteText"
       :show-mic="microphoneTransferEnabled"
+      :scale-mode="videoScaleMode"
+      :source-size-available="sourceSizeAvailable"
       @toggle-fullscreen="toggleFullscreen"
+      @update:scale-mode="setVideoScaleMode"
       @toggle-stats="openStatsSheet"
       @toggle-virtual-keyboard="handleToggleVirtualKeyboard"
       @toggle-mouse-mode="handleToggleMouseMode"
@@ -3237,29 +3261,34 @@ onUnmounted(() => {
           :class="{ 'md:pr-1': computerUsePanelVisible }"
         >
         <div
-          ref="videoContainerRef"
-          class="relative bg-black overflow-hidden flex items-center justify-center touch-none"
-          :style="videoContainerStyle"
-          :class="{
-            'cursor-none': true,
-          }"
-          tabindex="0"
-          @mouseleave="handleMouseLeaveVideo"
-          @pointerdown="handleTouchPointerDown"
-          @pointermove="handleTouchPointerMove"
-          @pointerup="handleTouchPointerUp"
-          @pointercancel="handleTouchPointerCancel"
-          @mousemove="handleMouseMove"
-          @mousedown="handleMouseDown"
-          @mouseup="handleMouseUp"
-          @wheel.prevent="handleWheel"
-          @contextmenu="handleContextMenu"
+          ref="videoWorkspaceRef"
+          class="video-workspace relative h-full w-full min-h-[120px] overflow-auto fullscreen:bg-black"
         >
+          <div
+            class="relative grid place-items-center"
+            :class="videoStageClass"
+          >
+            <div
+              ref="videoContainerRef"
+              class="relative flex shrink-0 cursor-none items-center justify-center overflow-hidden bg-black touch-none"
+              :style="videoContainerStyle"
+              tabindex="0"
+              @mouseleave="handleMouseLeaveVideo"
+              @pointerdown="handleTouchPointerDown"
+              @pointermove="handleTouchPointerMove"
+              @pointerup="handleTouchPointerUp"
+              @pointercancel="handleTouchPointerCancel"
+              @mousemove="handleMouseMove"
+              @mousedown="handleMouseDown"
+              @mouseup="handleMouseUp"
+              @wheel.prevent="handleWheel"
+              @contextmenu="handleContextMenu"
+            >
           <img
             v-show="videoMode === 'mjpeg'"
             ref="videoRef"
             :src="mjpegUrl"
-            class="w-full h-full object-contain pointer-events-none select-none"
+            class="size-full object-contain pointer-events-none select-none"
             :alt="t('console.videoAlt')"
             draggable="false"
             @load="handleVideoLoad"
@@ -3268,14 +3297,17 @@ onUnmounted(() => {
           <video
             v-show="videoMode !== 'mjpeg'"
             ref="webrtcVideoRef"
-            class="w-full h-full object-contain"
+            class="size-full object-contain pointer-events-none"
             autoplay
             playsinline
+            @loadedmetadata="handleWebRTCVideoResize"
+            @loadeddata="handleWebRTCVideoResize"
+            @resize="handleWebRTCVideoResize"
           />
           <img
             v-if="frameOverlayUrl"
             :src="frameOverlayUrl"
-            class="absolute inset-0 w-full h-full object-contain pointer-events-none"
+            class="absolute inset-0 size-full object-contain pointer-events-none"
             alt=""
           />
           <div
@@ -3430,6 +3462,8 @@ onUnmounted(() => {
               </div>
             </div>
           </Transition>
+            </div>
+          </div>
         </div>
         </div>
         <ComputerUseSheet
@@ -3534,5 +3568,10 @@ onUnmounted(() => {
 .fade-enter-from,
 .fade-leave-to {
   opacity: 0;
+}
+
+.video-workspace:fullscreen {
+  width: 100vw;
+  height: 100vh;
 }
 </style>
