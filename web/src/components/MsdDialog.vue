@@ -71,6 +71,9 @@ const loadingImages = ref(false)
 const imagesError = ref<string | null>(null)
 const uploadProgress = ref(0)
 const uploading = ref(false)
+const uploadProgressPercent = computed(() =>
+  Math.round(Math.min(100, Math.max(0, uploadProgress.value))),
+)
 
 const mountMode = ref<'cdrom' | 'flash'>('flash')
 // Default to readwrite for flash mode; cdrom forces readonly anyway
@@ -821,108 +824,116 @@ onUnmounted(() => {
                   </Button>
                 </div>
               </div>
-              <Progress v-if="uploading" :model-value="uploadProgress" class="h-1 shrink-0" />
-
-              <Skeleton v-if="loadingImages" class="h-24 w-full" />
-              <div
-                v-else-if="imagesError"
-                class="flex shrink-0 items-center justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/5 p-3"
-              >
-                <div class="min-w-0">
-                  <p class="text-sm font-medium text-destructive">{{ t('msd.operations.loadImages') }}</p>
-                  <p class="mt-1 text-xs text-muted-foreground">{{ imagesError }}</p>
-                </div>
-                <Button variant="outline" size="sm" @click="loadImages">{{ t('common.retry') }}</Button>
-              </div>
-              <Empty v-else-if="images.length === 0" class="shrink-0 py-6">
-                <EmptyHeader>
-                  <EmptyMedia variant="icon"><HardDrive /></EmptyMedia>
-                  <EmptyDescription>{{ t('msd.noImages') }}</EmptyDescription>
-                </EmptyHeader>
-              </Empty>
-
-              <div v-else class="flex-1 min-h-0 overflow-y-auto pr-2 custom-scrollbar">
+              <div class="min-h-0 flex-1 overflow-y-auto pr-2 custom-scrollbar">
                 <div class="space-y-2">
                   <div
-                    v-for="image in images"
-                    :key="image.id"
-                    class="rounded-md border p-2.5 transition-colors"
-                    :class="[
-                      mountedImage(image.id)
-                        ? 'border-primary/40 bg-muted/50'
-                        : 'border-border bg-background hover:bg-muted/40'
-                    ]"
+                    v-if="uploading"
+                    class="grid shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2"
                   >
-                    <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                      <div class="flex min-w-0 flex-1 items-start gap-2">
-                        <span v-if="mountedImage(image.id)" class="mt-1.5 size-2 shrink-0 rounded-full bg-primary" />
-                        <Disc v-else class="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-                        <div class="w-0 flex-1">
-                          <Tooltip>
-                            <TooltipTrigger as-child>
-                              <p class="text-sm font-medium cursor-help overflow-hidden text-ellipsis whitespace-nowrap">{{ image.name }}</p>
-                            </TooltipTrigger>
-                            <TooltipContent>
-                              <p class="max-w-sm break-all">{{ image.name }}</p>
-                            </TooltipContent>
-                          </Tooltip>
-                          <div class="flex items-center gap-2 mt-0.5 flex-wrap">
-                            <span class="text-xs text-muted-foreground">{{ formatBytes(image.size) }}</span>
-                            <Tooltip v-if="isLargeFile(image)">
+                    <Progress :model-value="uploadProgress" class="h-1 min-w-0" />
+                    <span class="justify-self-end text-right text-xs tabular-nums text-muted-foreground">
+                      {{ uploadProgressPercent }}%
+                    </span>
+                  </div>
+
+                  <Skeleton v-if="loadingImages" class="h-24 w-full" />
+                  <div
+                    v-else-if="imagesError"
+                    class="flex shrink-0 items-center justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/5 p-3"
+                  >
+                    <div class="min-w-0">
+                      <p class="text-sm font-medium text-destructive">{{ t('msd.operations.loadImages') }}</p>
+                      <p class="mt-1 text-xs text-muted-foreground">{{ imagesError }}</p>
+                    </div>
+                    <Button variant="outline" size="sm" @click="loadImages">{{ t('common.retry') }}</Button>
+                  </div>
+                  <Empty v-else-if="images.length === 0" class="shrink-0 py-6">
+                    <EmptyHeader>
+                      <EmptyMedia variant="icon"><HardDrive /></EmptyMedia>
+                      <EmptyDescription>{{ t('msd.noImages') }}</EmptyDescription>
+                    </EmptyHeader>
+                  </Empty>
+
+                  <template v-else v-for="image in images" :key="image.id">
+                    <div
+                      class="rounded-md border p-2.5 transition-colors"
+                      :class="[
+                        mountedImage(image.id)
+                          ? 'border-primary/40 bg-muted/50'
+                          : 'border-border bg-background hover:bg-muted/40'
+                      ]"
+                    >
+                      <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                        <div class="flex min-w-0 flex-1 items-start gap-2">
+                          <span v-if="mountedImage(image.id)" class="mt-1.5 size-2 shrink-0 rounded-full bg-primary" />
+                          <Disc v-else class="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                          <div class="w-0 flex-1">
+                            <Tooltip>
                               <TooltipTrigger as-child>
-                                <Badge
-                                  variant="outline"
-                                  class="h-4 cursor-help border-warning/50 px-1.5 text-[10px] text-warning"
-                                >
-                                  <AlertCircle class="size-2.5 mr-0.5" />
-                                  {{ t('msd.largeFileWarning') }}
-                                </Badge>
+                                <p class="text-sm font-medium cursor-help overflow-hidden text-ellipsis whitespace-nowrap">{{ image.name }}</p>
                               </TooltipTrigger>
                               <TooltipContent>
-                                <p>{{ t('msd.largeFileTooltip') }}</p>
+                                <p class="max-w-sm break-all">{{ image.name }}</p>
                               </TooltipContent>
                             </Tooltip>
+                            <div class="flex items-center gap-2 mt-0.5 flex-wrap">
+                              <span class="text-xs text-muted-foreground">{{ formatBytes(image.size) }}</span>
+                              <Tooltip v-if="isLargeFile(image)">
+                                <TooltipTrigger as-child>
+                                  <Badge
+                                    variant="outline"
+                                    class="h-4 cursor-help border-warning/50 px-1.5 text-[10px] text-warning"
+                                  >
+                                    <AlertCircle class="size-2.5 mr-0.5" />
+                                    {{ t('msd.largeFileWarning') }}
+                                  </Badge>
+                                </TooltipTrigger>
+                                <TooltipContent>
+                                  <p>{{ t('msd.largeFileTooltip') }}</p>
+                                </TooltipContent>
+                              </Tooltip>
+                            </div>
                           </div>
                         </div>
-                      </div>
-                      <div class="flex shrink-0 items-center justify-end gap-1.5">
-                        <template v-if="mountedImage(image.id)">
+                        <div class="flex shrink-0 items-center justify-end gap-1.5">
+                          <template v-if="mountedImage(image.id)">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              class="h-8 text-xs"
+                              :disabled="operationInProgress"
+                              @click="unmountImageById(image.id)"
+                            >
+                              <Unlink class="size-3.5 mr-1" />
+                              {{ t('msd.disconnect') }}
+                            </Button>
+                          </template>
+                          <template v-else>
+                            <Button
+                              variant="default"
+                              size="sm"
+                              class="h-8 text-xs"
+                              :disabled="operationInProgress || mediaSlotsFull"
+                              @click="connectImage(image)"
+                            >
+                              <Link v-if="!connecting" class="size-3.5 mr-1" />
+                              <span v-if="connecting">{{ t('common.connecting') }}...</span>
+                              <span v-else>{{ t('msd.connect') }}</span>
+                            </Button>
+                          </template>
                           <Button
-                            variant="outline"
-                            size="sm"
-                            class="h-8 text-xs"
-                            :disabled="operationInProgress"
-                            @click="unmountImageById(image.id)"
+                            variant="ghost"
+                            size="icon"
+                            class="size-8 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                            :disabled="operationInProgress || !!mountedImage(image.id)"
+                            @click="confirmDelete('image', image.id, image.name)"
                           >
-                            <Unlink class="size-3.5 mr-1" />
-                            {{ t('msd.disconnect') }}
+                            <Trash2 class="size-3.5" />
                           </Button>
-                        </template>
-                        <template v-else>
-                          <Button
-                            variant="default"
-                            size="sm"
-                            class="h-8 text-xs"
-                            :disabled="operationInProgress || mediaSlotsFull"
-                            @click="connectImage(image)"
-                          >
-                            <Link v-if="!connecting" class="size-3.5 mr-1" />
-                            <span v-if="connecting">{{ t('common.connecting') }}...</span>
-                            <span v-else>{{ t('msd.connect') }}</span>
-                          </Button>
-                        </template>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          class="size-8 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                          :disabled="operationInProgress || !!mountedImage(image.id)"
-                          @click="confirmDelete('image', image.id, image.name)"
-                        >
-                          <Trash2 class="size-3.5" />
-                        </Button>
+                        </div>
                       </div>
                     </div>
-                  </div>
+                  </template>
                 </div>
               </div>
 
