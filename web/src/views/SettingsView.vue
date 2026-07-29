@@ -368,7 +368,7 @@ function watchdogRequestError(error: unknown, action: 'enable' | 'disable'): str
 
 const watchdogStatusClass = computed(() => {
   switch (watchdogStatusKey.value) {
-    case 'running': return 'bg-success'
+    case 'running': return 'bg-status-active'
     case 'error': return 'bg-destructive'
     default: return 'bg-muted-foreground'
   }
@@ -819,7 +819,7 @@ function otgCheckStatusText(level: OtgSelfCheckLevel): string {
 function otgGroupStatusClass(status: OtgCheckGroupStatus): string {
   if (status === 'error') return 'bg-destructive'
   if (status === 'warn') return 'bg-warning'
-  if (status === 'ok') return 'bg-success'
+  if (status === 'ok') return 'bg-status-active'
   return 'bg-muted-foreground/40'
 }
 
@@ -1778,7 +1778,7 @@ function getExtStatusClass(status: ExtensionStatus | undefined): string {
   switch (status.state) {
     case 'unavailable': return 'bg-muted-foreground'
     case 'stopped': return 'bg-muted-foreground'
-    case 'running': return 'bg-success'
+    case 'running': return 'bg-status-active'
     default: return 'bg-muted-foreground'
   }
 }
@@ -2470,7 +2470,7 @@ function getRustdeskStatusClass(status: string | null | undefined): string {
   switch (status) {
     case 'running':
     case 'registered':
-    case 'connected': return 'bg-success'
+    case 'connected': return 'bg-status-active'
     case 'starting':
     case 'connecting': return 'bg-warning'
     case 'stopped':
@@ -2648,7 +2648,7 @@ function getVncServiceStatusText(status: string | undefined): string {
 
 function getVncStatusClass(status: string | undefined): string {
   switch (status) {
-    case 'running': return 'bg-success'
+    case 'running': return 'bg-status-active'
     case 'starting': return 'bg-warning'
     case 'stopped': return 'bg-muted-foreground'
     default:
@@ -2671,7 +2671,7 @@ function getRtspServiceStatusText(status: string | undefined): string {
 
 function getRtspStatusClass(status: string | undefined): string {
   switch (status) {
-    case 'running': return 'bg-success'
+    case 'running': return 'bg-status-active'
     case 'starting': return 'bg-warning'
     case 'stopped': return 'bg-muted-foreground'
     default:
@@ -2761,7 +2761,7 @@ watch(isWindows, () => {
         </SidebarContent>
       </Sidebar>
 
-      <SidebarInset class="min-w-0 overflow-y-auto">
+      <SidebarInset class="min-w-0">
       <!-- Mobile Header -->
       <div class="md:hidden sticky top-0 z-20 flex items-center px-3 sm:px-4 py-2 sm:py-3 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/70">
         <SidebarTrigger class="mr-1.5 size-8 sm:mr-2 sm:size-9" />
@@ -4362,7 +4362,7 @@ watch(isWindows, () => {
                   <!-- Status and controls -->
                   <div class="flex items-center justify-between">
                     <div class="flex items-center gap-2">
-                      <div :class="['w-2 h-2 rounded-full', getExtStatusClass(extensions?.ttyd?.status)]" />
+                      <div :class="['size-2 rounded-full', getExtStatusClass(extensions?.ttyd?.status)]" />
                       <span class="text-sm">{{ getExtStatusText(extensions?.ttyd?.status) }}</span>
                     </div>
                     <div class="flex gap-2">
@@ -4453,7 +4453,7 @@ watch(isWindows, () => {
                   <!-- Status and controls -->
                   <div class="flex items-center justify-between">
                     <div class="flex items-center gap-2">
-                      <div :class="['w-2 h-2 rounded-full', getExtStatusClass(extensions?.gostc?.status)]" />
+                      <div :class="['size-2 rounded-full', getExtStatusClass(extensions?.gostc?.status)]" />
                       <span class="text-sm">{{ getExtStatusText(extensions?.gostc?.status) }}</span>
                     </div>
                     <div class="flex gap-2">
@@ -4548,7 +4548,7 @@ watch(isWindows, () => {
                   <!-- Status and controls -->
                   <div class="flex items-center justify-between">
                     <div class="flex items-center gap-2">
-                      <div :class="['w-2 h-2 rounded-full', getExtStatusClass(extensions?.easytier?.status)]" />
+                      <div :class="['size-2 rounded-full', getExtStatusClass(extensions?.easytier?.status)]" />
                       <span class="text-sm">{{ getExtStatusText(extensions?.easytier?.status) }}</span>
                     </div>
                     <div class="flex gap-2">
@@ -4654,7 +4654,7 @@ watch(isWindows, () => {
                 <template v-else>
                   <div class="flex items-center justify-between">
                     <div class="flex items-center gap-2">
-                      <div :class="['w-2 h-2 rounded-full', getExtStatusClass(extensions?.frpc?.status)]" />
+                      <div :class="['size-2 rounded-full', getExtStatusClass(extensions?.frpc?.status)]" />
                       <span class="text-sm">{{ getExtStatusText(extensions?.frpc?.status) }}</span>
                     </div>
                     <div class="flex gap-2">
@@ -4828,7 +4828,7 @@ watch(isWindows, () => {
               <CardContent class="space-y-4">
                 <div class="flex items-center justify-between">
                   <div class="flex items-center gap-2">
-                    <div :class="['w-2 h-2 rounded-full', getRtspStatusClass(rtspStatus?.service_status)]" />
+                    <div :class="['size-2 rounded-full', getRtspStatusClass(rtspStatus?.service_status)]" />
                     <span class="text-sm">{{ getRtspServiceStatusText(rtspStatus?.service_status) }}</span>
                   </div>
                   <div class="flex items-center gap-2">
@@ -4954,7 +4954,7 @@ watch(isWindows, () => {
               <CardContent class="space-y-4">
                 <div class="flex items-center justify-between">
                   <div class="flex items-center gap-2">
-                    <div :class="['w-2 h-2 rounded-full', getVncStatusClass(vncStatus?.service_status)]" />
+                    <div :class="['size-2 rounded-full', getVncStatusClass(vncStatus?.service_status)]" />
                     <span class="text-sm">{{ getVncServiceStatusText(vncStatus?.service_status) }}</span>
                     <template v-if="vncStatus?.connection_count">
                       <span class="text-muted-foreground">|</span>
@@ -5077,11 +5077,11 @@ watch(isWindows, () => {
                 <!-- Status and controls -->
                 <div class="flex items-center justify-between">
                   <div class="flex items-center gap-2">
-                    <div :class="['w-2 h-2 rounded-full', getRustdeskStatusClass(rustdeskStatus?.service_status)]" />
+                    <div :class="['size-2 rounded-full', getRustdeskStatusClass(rustdeskStatus?.service_status)]" />
                     <span class="text-sm">{{ getRustdeskServiceStatusText(rustdeskStatus?.service_status) }}</span>
                     <template v-if="rustdeskStatus?.rendezvous_status">
                       <span class="text-muted-foreground">|</span>
-                      <div :class="['w-2 h-2 rounded-full', getRustdeskStatusClass(rustdeskStatus?.rendezvous_status)]" />
+                      <div :class="['size-2 rounded-full', getRustdeskStatusClass(rustdeskStatus?.rendezvous_status)]" />
                       <span class="text-sm text-muted-foreground">{{ getRustdeskRendezvousStatusText(rustdeskStatus?.rendezvous_status) }}</span>
                     </template>
                   </div>

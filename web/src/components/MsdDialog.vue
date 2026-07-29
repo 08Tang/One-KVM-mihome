@@ -714,8 +714,8 @@ onUnmounted(() => {
           <span class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
             <span :class="msdConnected ? 'text-success' : 'text-muted-foreground'" class="flex items-center gap-1.5">
               <span class="relative flex size-2">
-                <span v-if="msdConnected" class="absolute inline-flex h-full w-full animate-ping rounded-full bg-success opacity-75"></span>
-                <span :class="msdConnected ? 'bg-success' : 'bg-muted-foreground'" class="relative inline-flex size-2 rounded-full"></span>
+                <span v-if="msdConnected" class="absolute inline-flex size-full animate-ping rounded-full bg-status-active opacity-75"></span>
+                <span :class="msdConnected ? 'bg-status-active' : 'bg-muted-foreground'" class="relative inline-flex size-2 rounded-full"></span>
               </span>
               {{ msdConnected ? t('common.connected') : t('common.disconnected') }}
             </span>
