@@ -550,7 +550,7 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    let update_service = Arc::new(UpdateService::new(data_dir.join("updates")));
+    let update_service = Arc::new(UpdateService::new());
     let computer_use = ComputerUseManager::new(config_store.clone(), hid.clone());
 
     let state = AppState::new(
