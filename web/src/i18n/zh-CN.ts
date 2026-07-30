@@ -302,7 +302,7 @@ export default {
     signal: {
       noSignal: {
         title: '暂无视频信号',
-        detail: '采集卡已就绪，正在等待被控机画面',
+        detail: '未检测到视频信号',
       },
       deviceLost: {
         title: '视频设备已断开',
@@ -326,7 +326,7 @@ export default {
       },
       reason: {
         no_cable: '未检测到 HDMI 线缆，请检查连接或被控机是否已开机',
-        no_sync: '信号不稳定，无法锁定时序，可尝试降低被控机分辨率/刷新率',
+        no_sync: '无信号或信号不稳定，无法锁定时序',
         out_of_range: '分辨率或刷新率超出采集卡能力，建议切换到 1080p60 以内',
         no_signal: '采集卡已就绪，正在等待画面…',
         recovering: '正在自动重连视频设备',
@@ -495,8 +495,8 @@ export default {
   },
   settings: {
     title: '系统设置',
-    sidebarSubtitle: '管理设备、网络与扩展',
     appearance: '外观',
+    accountSubtitle: '管理控制台登录账户与安全验证',
     account: '账户',
     video: '视频',
     encoder: '编码器',
@@ -504,6 +504,7 @@ export default {
     msd: 'MSD',
     atx: 'ATX',
     environment: '环境',
+    networkSubtitle: '配置 Web 服务端口、监听地址与 HTTPS',
     network: '网络',
     hardware: '硬件',
     system: '系统',

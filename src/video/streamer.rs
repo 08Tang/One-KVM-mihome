@@ -19,7 +19,7 @@ use super::device::{
 use super::format::{PixelFormat, Resolution};
 use super::frame::{FrameBuffer, FrameBufferPool, VideoFrame};
 use crate::error::{AppError, Result};
-use crate::events::{EventBus, StreamDeviceLostKind, SystemEvent};
+use crate::events::{EventBus, StreamKind, SystemEvent};
 use crate::stream::MjpegStreamHandler;
 use crate::utils::LogThrottler;
 use crate::video::capture::runtime::open_capture_stream;
@@ -28,7 +28,7 @@ use crate::video::capture::status::{
     CaptureIoErrorKind,
 };
 use crate::video::capture::{
-    is_source_changed_error, BridgeContext, CaptureStream, DEFAULT_CAPTURE_BUFFER_COUNT,
+    BridgeContext, CaptureReadError, CaptureStream, DEFAULT_CAPTURE_BUFFER_COUNT,
 };
 use crate::video::recovery::{wait_for_source_change, CaptureRecoveryPolicy};
 
@@ -252,6 +252,7 @@ impl Streamer {
         let next = self.next_retry_ms.load(Ordering::Relaxed);
 
         SystemEvent::StreamStateChanged {
+            kind: StreamKind::Video,
             state: external.to_string(),
             device,
             reason: reason.map(|s| s.to_string()),
@@ -1067,16 +1068,19 @@ impl Streamer {
                 let mut owned = buffer_pool.take(MIN_CAPTURE_FRAME_SIZE);
                 let meta = match stream.next_into(&mut owned) {
                     Ok(meta) => meta,
-                    Err(e) => {
-                        if is_source_changed_error(&e) {
-                            info!("Capture SOURCE_CHANGE — soft-restart for DV re-probe");
-                            let delay = recovery_policy
-                                .retry_delay(no_signal_restart_count.saturating_add(1));
-                            set_retry(delay.as_millis() as u64);
-                            go_offline();
-                            set_state(StreamerState::NoSignal);
-                            need_soft_restart = true;
-                            break 'capture;
+                    Err(CaptureReadError::SourceChanged) => {
+                        info!("Capture SOURCE_CHANGE — soft-restart for DV re-probe");
+                        let delay =
+                            recovery_policy.retry_delay(no_signal_restart_count.saturating_add(1));
+                        set_retry(delay.as_millis() as u64);
+                        go_offline();
+                        set_state(StreamerState::NoSignal);
+                        need_soft_restart = true;
+                        break 'capture;
+                    }
+                    Err(CaptureReadError::Io(e)) => {
+                        if e.kind() == std::io::ErrorKind::WouldBlock {
+                            continue 'capture;
                         }
                         if e.kind() == std::io::ErrorKind::TimedOut {
                             if signal_present {
@@ -1308,9 +1312,11 @@ impl Streamer {
     pub async fn stats(&self) -> StreamerStats {
         let config = self.config.read().await;
         let fps = self.current_fps.load(Ordering::Relaxed) as f32 / 100.0;
+        let (state, reason) = self.state().await.external_state();
 
         StreamerStats {
-            state: self.state().await,
+            state: state.to_string(),
+            reason: reason.map(str::to_string),
             device: self.current_device().await.map(|d| d.name),
             format: Some(config.format.to_string()),
             resolution: Some((config.resolution.width, config.resolution.height)),
@@ -1402,7 +1408,7 @@ impl Streamer {
 
         // Publish device lost event
         self.publish_event(SystemEvent::StreamDeviceLost {
-            kind: StreamDeviceLostKind::Video,
+            kind: StreamKind::Video,
             device: device.clone(),
             reason: reason.clone(),
         })
@@ -1551,7 +1557,9 @@ impl Default for Streamer {
 /// Streamer statistics
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct StreamerStats {
-    pub state: StreamerState,
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     pub device: Option<String>,
     pub format: Option<String>,
     pub resolution: Option<(u32, u32)>,

@@ -12,7 +12,7 @@ use super::device::{enumerate_audio_devices, AudioDeviceInfo};
 use super::monitor::AudioHealthMonitor;
 use super::streamer::{AudioStreamState, AudioStreamer, AudioStreamerConfig};
 use super::types::AudioControllerConfig;
-use crate::events::{EventBus, StreamDeviceLostKind, SystemEvent};
+use crate::events::{EventBus, StreamKind, SystemEvent};
 
 const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 
@@ -286,6 +286,7 @@ impl AudioRecovery {
     ) {
         if let Some(bus) = self.inner.event_bus.read().await.as_ref() {
             bus.publish(SystemEvent::StreamStateChanged {
+                kind: StreamKind::Audio,
                 state: state.to_string(),
                 device,
                 reason: reason.map(str::to_string),
@@ -298,7 +299,7 @@ impl AudioRecovery {
     async fn publish_device_lost(&self, device: &str, reason: &str) {
         if let Some(bus) = self.inner.event_bus.read().await.as_ref() {
             bus.publish(SystemEvent::StreamDeviceLost {
-                kind: StreamDeviceLostKind::Audio,
+                kind: StreamKind::Audio,
                 device: device.to_string(),
                 reason: reason.to_string(),
             });

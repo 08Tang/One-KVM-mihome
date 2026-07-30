@@ -47,7 +47,7 @@ use crate::video::capture::status::{
     capture_error_log_key, classify_capture_io_error, is_device_lost_message,
     signal_status_from_capture_kind, CaptureIoErrorKind,
 };
-use crate::video::capture::{is_source_changed_error, BridgeContext, CaptureStream};
+use crate::video::capture::{BridgeContext, CaptureReadError, CaptureStream};
 use crate::video::codec::h264_bitstream;
 use crate::video::codec::registry::{EncoderBackend, VideoEncoderType};
 use crate::video::device::parse_bridge_kind;
@@ -96,6 +96,13 @@ pub struct PipelineAppliedConfig {
     pub resolution: Resolution,
     pub format: PixelFormat,
     pub fps: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipelineLifecycle {
+    Running,
+    Stopping,
+    Stopped,
 }
 
 impl PipelineStateNotification {
@@ -451,6 +458,19 @@ impl SharedVideoPipeline {
     /// Check if running
     pub fn is_running(&self) -> bool {
         *self.running_rx.borrow()
+    }
+
+    /// Lifecycle state derived from the stop-request flag and the capture
+    /// thread's completion signal.  A stopping pipeline must never receive a
+    /// new subscriber or be replaced before it releases the V4L2 device.
+    pub fn lifecycle(&self) -> PipelineLifecycle {
+        if self.running_flag.load(Ordering::Acquire) {
+            PipelineLifecycle::Running
+        } else if *self.running_rx.borrow() {
+            PipelineLifecycle::Stopping
+        } else {
+            PipelineLifecycle::Stopped
+        }
     }
 
     /// Subscribe to running state changes
@@ -909,7 +929,7 @@ impl SharedVideoPipeline {
                             consecutive_timeouts = 0;
                             meta
                         }
-                        Err(e) => {
+                        Err(CaptureReadError::SourceChanged) => {
                             // V4L2 driver reported V4L2_EVENT_SOURCE_CHANGE.
                             // The current capture is effectively invalidated:
                             // drop the stream so the next iteration re-opens
@@ -917,21 +937,22 @@ impl SharedVideoPipeline {
                             // path for source-side resolution switches on
                             // RK628 / rkcif; the retry policy is only a fallback
                             // when a driver does not provide usable events.
-                            if is_source_changed_error(&e) {
-                                info!(
-                                    "Capture reported SOURCE_CHANGE — \
-                                     dropping stream for immediate re-open"
-                                );
-                                if recovery_policy.control_mode()
-                                    == VideoControlMode::SourceFollowing
-                                {
-                                    pipeline.notify_state(PipelineStateNotification::no_signal(
-                                        SignalStatus::NoSignal,
-                                        Some(recovery_policy.retry_delay(1).as_millis() as u64),
-                                    ));
-                                }
-                                consecutive_timeouts = 0;
-                                stream = None;
+                            info!(
+                                "Capture reported SOURCE_CHANGE — \
+                                 dropping stream for immediate re-open"
+                            );
+                            if recovery_policy.control_mode() == VideoControlMode::SourceFollowing {
+                                pipeline.notify_state(PipelineStateNotification::no_signal(
+                                    SignalStatus::NoSignal,
+                                    Some(recovery_policy.retry_delay(1).as_millis() as u64),
+                                ));
+                            }
+                            consecutive_timeouts = 0;
+                            stream = None;
+                            continue;
+                        }
+                        Err(CaptureReadError::Io(e)) => {
+                            if e.kind() == std::io::ErrorKind::WouldBlock {
                                 continue;
                             }
                             if e.kind() == std::io::ErrorKind::TimedOut {
@@ -1607,10 +1628,12 @@ mod tests {
 
         assert!(!pipeline.running_flag.load(Ordering::Acquire));
         assert!(pipeline.is_running());
+        assert_eq!(pipeline.lifecycle(), PipelineLifecycle::Stopping);
 
         // Simulate the capture thread's common cleanup tail.
         let _ = pipeline.running.send(false);
         assert!(!pipeline.is_running());
+        assert_eq!(pipeline.lifecycle(), PipelineLifecycle::Stopped);
     }
 
     #[tokio::test]

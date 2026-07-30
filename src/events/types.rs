@@ -92,10 +92,10 @@ pub struct ClientStats {
     pub connected_secs: u64,
 }
 
-/// Video vs audio source for [`SystemEvent::StreamDeviceLost`] (WebSocket `stream.device_lost`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Media subsystem that owns a stream state or device event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum StreamDeviceLostKind {
+pub enum StreamKind {
     Video,
     Audio,
 }
@@ -114,6 +114,7 @@ pub enum SystemEvent {
 
     #[serde(rename = "stream.state_changed")]
     StreamStateChanged {
+        kind: StreamKind,
         state: String,
         device: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -141,7 +142,7 @@ pub enum SystemEvent {
 
     #[serde(rename = "stream.device_lost")]
     StreamDeviceLost {
-        kind: StreamDeviceLostKind,
+        kind: StreamKind,
         device: String,
         reason: String,
     },
@@ -274,6 +275,7 @@ mod tests {
     #[test]
     fn test_event_name() {
         let event = SystemEvent::StreamStateChanged {
+            kind: StreamKind::Video,
             state: "streaming".to_string(),
             device: Some("/dev/video0".to_string()),
             reason: None,
@@ -285,7 +287,7 @@ mod tests {
     #[test]
     fn stream_device_lost_json_snake_case_kind() {
         let event = SystemEvent::StreamDeviceLost {
-            kind: StreamDeviceLostKind::Audio,
+            kind: StreamKind::Audio,
             device: "hw:0,0".to_string(),
             reason: "test".to_string(),
         };
@@ -306,6 +308,7 @@ mod tests {
                 from_mode: String::new(),
             },
             SystemEvent::StreamStateChanged {
+                kind: StreamKind::Video,
                 state: String::new(),
                 device: None,
                 reason: None,
@@ -323,7 +326,7 @@ mod tests {
                 fps: 0,
             },
             SystemEvent::StreamDeviceLost {
-                kind: StreamDeviceLostKind::Video,
+                kind: StreamKind::Video,
                 device: String::new(),
                 reason: String::new(),
             },

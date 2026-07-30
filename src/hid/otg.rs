@@ -167,9 +167,9 @@ impl OtgBackend {
         if now.duration_since(*last_log).as_secs() >= 1 {
             let count = self.error_count.swap(0, Ordering::Relaxed);
             if count > 1 {
-                warn!("{} (repeated {} times)", msg, count);
+                debug!("{} (repeated {} times)", msg, count);
             } else {
-                warn!("{}", msg);
+                debug!("{}", msg);
             }
             *last_log = now;
         } else {

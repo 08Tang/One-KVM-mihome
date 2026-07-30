@@ -1,7 +1,7 @@
 import { useI18n } from 'vue-i18n'
 import { toast } from 'vue-sonner'
 import { useSystemStore } from '@/stores/system'
-import type { StreamDeviceLostEventData } from '@/types/websocket'
+import type { StreamDeviceLostEventData, StreamStateChangedEventData } from '@/types/websocket'
 import { useWebSocket } from '@/composables/useWebSocket'
 import { isAudioStreamDeviceLostPayload } from '@/lib/streamSignal'
 
@@ -13,12 +13,7 @@ export interface ConsoleEventHandlers {
   onStreamModeSwitching?: (data: { transition_id: string; to_mode: string; from_mode: string }) => void
   onStreamModeReady?: (data: { transition_id: string; mode: string }) => void
   onWebRTCReady?: (data: { codec: string; hardware: boolean; transition_id?: string }) => void
-  onStreamStateChanged?: (data: {
-    state: string
-    device?: string | null
-    reason?: string | null
-    next_retry_ms?: number | null
-  }) => void
+  onStreamStateChanged?: (data: StreamStateChangedEventData) => void
   onStreamDeviceLost?: (data: StreamDeviceLostEventData) => void
   onStreamReconnecting?: (data: { device: string; attempt: number }) => void
   onStreamRecovered?: (data: { device: string }) => void
@@ -57,12 +52,7 @@ export function useConsoleEvents(handlers: ConsoleEventHandlers) {
     handlers.onStreamRecovered?.(_data)
   }
 
-  function handleStreamStateChangedForward(data: {
-    state: string
-    device?: string | null
-    reason?: string | null
-    next_retry_ms?: number | null
-  }) {
+  function handleStreamStateChangedForward(data: StreamStateChangedEventData) {
     handlers.onStreamStateChanged?.(data)
   }
 

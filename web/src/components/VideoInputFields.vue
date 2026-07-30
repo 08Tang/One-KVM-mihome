@@ -32,7 +32,7 @@ const { t } = useI18n()
 <template>
   <template v-if="device?.control_mode === 'source_following'">
     <div v-if="device.input_status.state === 'locked'" class="space-y-2">
-      <dl class="grid grid-cols-3 gap-3" :class="compact ? 'text-xs' : 'text-sm'">
+      <dl class="grid grid-cols-3 gap-3 text-center" :class="compact ? 'text-xs' : 'text-sm'">
         <div class="min-w-0 space-y-1">
           <dt class="text-muted-foreground">{{ t('videoInput.format') }}</dt>
           <dd class="truncate font-medium" :title="device.input_status.format ?? ''">

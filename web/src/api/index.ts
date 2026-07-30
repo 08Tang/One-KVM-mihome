@@ -10,6 +10,7 @@ import type {
   ComputerUseStartRequest,
 } from '@/types/generated'
 import { useHidWebSocket, type HidKeyboardEvent, type HidMouseEvent } from '@/composables/useHidWebSocket'
+import type { StreamSignalReason, StreamState } from '@/types/websocket'
 
 const API_BASE = '/api'
 
@@ -299,18 +300,8 @@ export interface VideoEncoderSelfCheckResponse {
 export const streamApi = {
   status: () =>
     request<{
-      state:
-        | 'uninitialized'
-        | 'ready'
-        | 'streaming'
-        | 'no_signal'
-        | 'no_cable'
-        | 'no_sync'
-        | 'out_of_range'
-        | 'device_lost'
-        | 'recovering'
-        | 'device_busy'
-        | 'error'
+      state: StreamState
+      reason?: StreamSignalReason | null
       device: string | null
       format: string | null
       resolution: [number, number] | null

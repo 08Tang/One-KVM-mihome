@@ -3,6 +3,7 @@
 use std::fs::File;
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
@@ -14,7 +15,9 @@ use tracing::{debug, info, warn};
 use v4l2r::bindings::{
     v4l2_bt_timings, v4l2_dv_timings, V4L2_DV_BT_656_1120, V4L2_DV_FL_HAS_CEA861_VIC,
 };
-use v4l2r::ioctl::{self, Event as V4l2Event, EventType, QueryDvTimingsError, SubscribeEventFlags};
+use v4l2r::ioctl::{
+    self, Event as V4l2Event, EventType, IntoErrno, QueryDvTimingsError, SubscribeEventFlags,
+};
 use v4l2r::nix::errno::Errno;
 
 use crate::video::signal::SignalStatus;
@@ -134,7 +137,36 @@ fn read_sysfs_name(subdev_sysfs: &Path) -> Option<String> {
 }
 
 pub fn open_subdev(path: &Path) -> io::Result<File> {
-    File::options().read(true).write(true).open(path)
+    File::options()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+}
+
+/// Drain a non-blocking V4L2 event queue until the driver reports that it is
+/// empty.  Both video nodes and subdevices use the same event ioctl contract.
+pub fn drain_v4l2_events(fd: &File) -> u32 {
+    let mut drained = 0u32;
+    loop {
+        match ioctl::dqevent::<V4l2Event>(fd) {
+            Ok(_event) => {
+                drained = drained.saturating_add(1);
+                if drained >= 16 {
+                    break;
+                }
+            }
+            Err(error) => {
+                let message = error.to_string();
+                let errno = error.into_errno();
+                if errno != Errno::EAGAIN as i32 && errno != Errno::ENOENT as i32 {
+                    debug!("Failed to drain V4L2 event queue: {}", message);
+                }
+                break;
+            }
+        }
+    }
+    drained
 }
 
 pub fn probe_signal(subdev_fd: &impl AsRawFd, kind: CsiBridgeKind) -> ProbeResult {
@@ -298,13 +330,7 @@ pub fn wait_source_change(subdev_fd: &File, timeout: Duration) -> io::Result<boo
         }
     }
 
-    let mut drained = 0u32;
-    while let Ok(_ev) = ioctl::dqevent::<V4l2Event>(subdev_fd) {
-        drained = drained.saturating_add(1);
-        if drained >= 16 {
-            break;
-        }
-    }
+    let drained = drain_v4l2_events(subdev_fd);
     debug!("subdev source_change drained {} event(s)", drained);
     Ok(true)
 }
@@ -312,6 +338,15 @@ pub fn wait_source_change(subdev_fd: &File, timeout: Duration) -> io::Result<boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subdevice_handles_are_non_blocking() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let opened = open_subdev(file.path()).unwrap();
+        let flags = unsafe { libc::fcntl(opened.as_raw_fd(), libc::F_GETFL) };
+        assert!(flags >= 0);
+        assert_ne!(flags & libc::O_NONBLOCK, 0);
+    }
 
     #[test]
     fn rk628_fingerprint_matches_vga() {

@@ -4,6 +4,6 @@ mod encoder_state;
 mod shared;
 
 pub use shared::{
-    EncodedVideoFrame, PipelineAppliedConfig, PipelineStateNotification, SharedVideoPipeline,
-    SharedVideoPipelineConfig, SharedVideoPipelineStats,
+    EncodedVideoFrame, PipelineAppliedConfig, PipelineLifecycle, PipelineStateNotification,
+    SharedVideoPipeline, SharedVideoPipelineConfig, SharedVideoPipelineStats,
 };

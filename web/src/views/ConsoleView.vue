@@ -27,7 +27,7 @@ import { formatFpsValue } from '@/lib/fps'
 import { videoDebugLog } from '@/lib/debugLog'
 import { formatVideoDeviceLabel } from '@/lib/video-device-label'
 import { isAudioDeviceLostStateReason, isAudioStreamDeviceLostPayload } from '@/lib/streamSignal'
-import type { StreamDeviceLostEventData } from '@/types/websocket'
+import type { StreamDeviceLostEventData, StreamStateChangedEventData } from '@/types/websocket'
 import type { VideoMode } from '@/components/VideoConfigPopover.vue'
 
 import StatusCard, { type StatusDetail } from '@/components/StatusCard.vue'
@@ -1356,7 +1356,7 @@ function handleStreamModeSwitching(data: { transition_id: string; to_mode: strin
   videoSession.onModeSwitching(data)
 }
 
-function handleStreamStateChanged(data: any) {
+function handleStreamStateChanged(data: StreamStateChangedEventData) {
   videoDebugLog('Stream state changed event', {
     data,
     videoMode: videoMode.value,
@@ -1468,8 +1468,8 @@ const signalOverlayInfo = computed(() => {
     case 'no_signal':
       return {
         title: t('console.signal.noSignal.title'),
-        detail: t('console.signal.noSignal.detail'),
-        hint,
+        detail: hint || t('console.signal.noSignal.detail'),
+        hint: '',
         tone: 'info' as const,
       }
     case 'device_lost':
@@ -3083,6 +3083,10 @@ onMounted(async () => {
   }, { immediate: true })
 
   await systemStore.startStream().catch(() => {})
+  const initialStreamStatus = await streamApi.status().catch(() => null)
+  if (initialStreamStatus) {
+    handleStreamStateChanged(initialStreamStatus)
+  }
   await systemStore.fetchSystemInfo().catch(() => {})
   await systemStore.fetchAllStates()
   await configStore.refreshHid().then(() => {
@@ -3398,7 +3402,7 @@ onUnmounted(() => {
           </div>
           <Transition name="fade">
             <div
-              v-if="videoLoading"
+              v-if="videoLoading && !showSignalOverlay && !videoError"
               class="absolute inset-0 flex flex-col items-center justify-center bg-black/70 backdrop-blur-sm transition-opacity duration-300"
             >
               <div class="absolute inset-0 overflow-hidden pointer-events-none">
@@ -3443,7 +3447,7 @@ onUnmounted(() => {
           </Transition>
           <Transition name="fade">
             <div
-              v-if="showSignalOverlay && !videoLoading && !videoError"
+              v-if="showSignalOverlay && !videoError"
               class="absolute inset-0 flex flex-col items-center justify-center gap-3 p-4 transition-opacity duration-300 pointer-events-none"
               :class="{
                 'bg-black/80 backdrop-blur-sm': signalOverlayInfo.tone === 'error',

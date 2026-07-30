@@ -303,7 +303,7 @@ export default {
     signal: {
       noSignal: {
         title: 'Waiting for video signal',
-        detail: 'Capture device is ready, waiting for the target to output video',
+        detail: 'No video signal detected',
       },
       deviceLost: {
         title: 'Video device offline',
@@ -327,7 +327,7 @@ export default {
       },
       reason: {
         no_cable: 'HDMI cable not detected — check the cable and that the target is powered on',
-        no_sync: 'Unstable signal: timings could not be locked — try a lower resolution or refresh rate',
+        no_sync: 'No signal or unstable signal; unable to lock timing',
         out_of_range: 'Resolution or refresh rate exceeds capture capability — try 1080p60 or below',
         no_signal: 'Capture card is ready, waiting for a picture…',
         recovering: 'Reconnecting the video device automatically',
@@ -496,8 +496,8 @@ export default {
   },
   settings: {
     title: 'Settings',
-    sidebarSubtitle: 'Manage device, network and extensions',
     appearance: 'Appearance',
+    accountSubtitle: 'Manage console login credentials and security verification',
     account: 'Account',
     video: 'Video',
     encoder: 'Encoder',
@@ -505,6 +505,7 @@ export default {
     msd: 'MSD',
     atx: 'ATX',
     environment: 'Environment',
+    networkSubtitle: 'Configure web server ports, listen addresses, and HTTPS',
     network: 'Network',
     hardware: 'Hardware',
     system: 'System',

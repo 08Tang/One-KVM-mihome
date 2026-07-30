@@ -2717,7 +2717,6 @@ watch(isWindows, () => {
       <Sidebar class="top-10 h-[calc(100dvh-2.5rem)] sm:top-14 sm:h-[calc(100dvh-3.5rem)]" collapsible="offcanvas">
         <SidebarHeader class="gap-1 px-6 pt-4 pb-2 text-foreground md:pt-6">
           <h1 class="text-xl font-semibold">{{ t('settings.title') }}</h1>
-          <p class="text-xs text-muted-foreground">{{ t('settings.sidebarSubtitle') }}</p>
         </SidebarHeader>
         <SidebarContent class="px-3 pb-6 md:pb-10">
           <SidebarGroup v-for="group in navGroups" :key="group.title" class="px-0 py-1">

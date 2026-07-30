@@ -10,7 +10,7 @@ use tracing::{debug, info, trace, warn};
 
 use crate::audio::{AudioController, OpusFrame};
 use crate::error::{AppError, Result};
-use crate::events::{EventBus, StreamDeviceLostKind, SystemEvent};
+use crate::events::{EventBus, StreamKind, SystemEvent};
 use crate::hid::HidController;
 use crate::video::capture::DEFAULT_CAPTURE_BUFFER_COUNT;
 use crate::video::codec::h264_bitstream;
@@ -19,9 +19,9 @@ use crate::video::device::{
     VideoDeviceRecoveryHint,
 };
 use crate::video::types::{
-    BitratePreset, EncoderBackend, PipelineStateNotification, PixelFormat, Resolution,
-    SharedVideoPipeline, SharedVideoPipelineConfig, SharedVideoPipelineStats, VideoCodecType,
-    VideoEncoderType,
+    BitratePreset, EncoderBackend, PipelineLifecycle, PipelineStateNotification, PixelFormat,
+    Resolution, SharedVideoPipeline, SharedVideoPipelineConfig, SharedVideoPipelineStats,
+    VideoCodecType, VideoEncoderType,
 };
 
 use super::config::{TurnServer, WebRtcConfig};
@@ -263,6 +263,7 @@ impl WebRtcStreamer {
             Arc::new(move |notification: PipelineStateNotification| {
                 let recovered = update_signal_recovery_edge(&recovery_pending, notification.state);
                 events.publish(SystemEvent::StreamStateChanged {
+                    kind: StreamKind::Video,
                     state: notification.state.to_string(),
                     device: Some(device.clone()),
                     reason: notification.reason.map(|reason| reason.to_string()),
@@ -398,7 +399,7 @@ impl WebRtcStreamer {
             );
             streamer
                 .publish_stream_event(SystemEvent::StreamDeviceLost {
-                    kind: StreamDeviceLostKind::Video,
+                    kind: StreamKind::Video,
                     device: original_device.clone(),
                     reason: reason.clone(),
                 })
@@ -415,6 +416,7 @@ impl WebRtcStreamer {
                     .await;
                 streamer
                     .publish_stream_event(SystemEvent::StreamStateChanged {
+                        kind: StreamKind::Video,
                         state: "device_lost".to_string(),
                         device: Some(original_device.clone()),
                         reason: Some("recovering".to_string()),
@@ -478,9 +480,17 @@ impl WebRtcStreamer {
     async fn ensure_video_pipeline(&self) -> Result<Arc<SharedVideoPipeline>> {
         let mut pipeline_guard = self.video_pipeline.write().await;
 
-        if let Some(ref pipeline) = *pipeline_guard {
-            if pipeline.is_running() {
-                return Ok(pipeline.clone());
+        if let Some(pipeline) = pipeline_guard.as_ref().cloned() {
+            match pipeline.lifecycle() {
+                PipelineLifecycle::Running => return Ok(pipeline),
+                PipelineLifecycle::Stopping => {
+                    info!("Waiting for stopping video pipeline to release capture device");
+                    pipeline.stop_and_wait(PIPELINE_RELEASE_TIMEOUT).await?;
+                    *pipeline_guard = None;
+                }
+                PipelineLifecycle::Stopped => {
+                    *pipeline_guard = None;
+                }
             }
         }
 

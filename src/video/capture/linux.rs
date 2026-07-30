@@ -3,6 +3,7 @@
 use std::fs::File;
 use std::io;
 use std::os::fd::AsFd;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -13,28 +14,20 @@ use v4l2r::bindings::{
     V4L2_DV_BT_656_1120,
 };
 use v4l2r::ioctl::{
-    self, Capabilities, Capability as V4l2rCapability, Event as V4l2Event, EventType,
-    MemoryConsistency, PlaneMapping, QBufPlane, QBuffer, QueryBuffer, QueryDvTimingsError,
-    SubscribeEventFlags, V4l2Buffer,
+    self, Capabilities, Capability as V4l2rCapability, EventType, IntoErrno, MemoryConsistency,
+    PlaneMapping, QBufPlane, QBuffer, QueryBuffer, QueryDvTimingsError, SubscribeEventFlags,
+    V4l2Buffer,
 };
 use v4l2r::memory::{MemoryType, MmapHandle};
 use v4l2r::nix::errno::Errno;
 use v4l2r::{Format as V4l2rFormat, PixelFormat as V4l2rPixelFormat, QueueType};
 
+use super::CaptureReadError;
 use crate::error::{AppError, Result};
 use crate::video::device::bridge::{self as csi_bridge, CsiBridgeKind, ProbeResult};
 use crate::video::device::VideoControlMode;
 use crate::video::format::{PixelFormat, Resolution};
 use crate::video::signal::SignalStatus;
-
-/// `io::Error` payload when the driver posts `V4L2_EVENT_SOURCE_CHANGE`.
-pub const SOURCE_CHANGED_MARKER: &str = "v4l2_source_changed";
-
-pub fn is_source_changed_error(err: &io::Error) -> bool {
-    err.get_ref()
-        .map(|inner| inner.to_string() == SOURCE_CHANGED_MARKER)
-        .unwrap_or(false)
-}
 
 /// Metadata for a captured frame.
 #[derive(Debug, Clone, Copy)]
@@ -74,6 +67,14 @@ pub struct CaptureStream {
     bridge_kind: Option<CsiBridgeKind>,
     native_hdmirx_state: Option<NativeHdmirxState>,
     native_hdmirx_next_state_check: Option<Instant>,
+}
+
+fn open_capture_device(path: &Path) -> io::Result<File> {
+    File::options()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
 }
 
 impl CaptureStream {
@@ -149,10 +150,7 @@ impl CaptureStream {
         }
 
         // ── Phase 1: open the capture (video) node ─────────────────────
-        let mut fd = File::options()
-            .read(true)
-            .write(true)
-            .open(device_path.as_ref())
+        let mut fd = open_capture_device(device_path.as_ref())
             .map_err(|e| AppError::VideoError(format!("Failed to open device: {}", e)))?;
 
         let caps: V4l2rCapability = ioctl::querycap(&fd)
@@ -423,7 +421,10 @@ impl CaptureStream {
         }
     }
 
-    pub fn next_into(&mut self, dst: &mut Vec<u8>) -> io::Result<CaptureMeta> {
+    pub fn next_into(
+        &mut self,
+        dst: &mut Vec<u8>,
+    ) -> std::result::Result<CaptureMeta, CaptureReadError> {
         self.wait_ready()?;
 
         // Several vendor BSPs update G_FMT/DV timings without making the
@@ -440,12 +441,20 @@ impl CaptureStream {
                 info!(
                     "Native HDMI RX active format/timings changed without a usable event; requesting stream re-open"
                 );
-                return Err(io::Error::other(SOURCE_CHANGED_MARKER));
+                return Err(CaptureReadError::SourceChanged);
             }
         }
 
-        let dqbuf: V4l2Buffer = ioctl::dqbuf(&self.fd, self.queue, MemoryType::Mmap)
-            .map_err(|e| io::Error::other(format!("dqbuf failed: {}", e)))?;
+        let dqbuf: V4l2Buffer =
+            ioctl::dqbuf(&self.fd, self.queue, MemoryType::Mmap).map_err(|error| {
+                let message = error.to_string();
+                let error = if error.into_errno() == Errno::EAGAIN as i32 {
+                    io::Error::from(io::ErrorKind::WouldBlock)
+                } else {
+                    io::Error::other(format!("dqbuf failed: {}", message))
+                };
+                CaptureReadError::Io(error)
+            })?;
         let index = dqbuf.as_v4l2_buffer().index as usize;
         let sequence = dqbuf.as_v4l2_buffer().sequence as u64;
 
@@ -495,7 +504,7 @@ impl CaptureStream {
                     self.resolution.height,
                     self.stride
                 );
-                return Err(io::Error::other(SOURCE_CHANGED_MARKER));
+                return Err(CaptureReadError::SourceChanged);
             }
         }
 
@@ -505,7 +514,7 @@ impl CaptureStream {
         })
     }
 
-    fn wait_ready(&self) -> io::Result<()> {
+    fn wait_ready(&self) -> std::result::Result<(), CaptureReadError> {
         if self.timeout.is_zero() {
             return Ok(());
         }
@@ -524,16 +533,17 @@ impl CaptureStream {
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "capture timeout"));
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "capture timeout").into());
             }
             // `nix::poll` accepts a u16 millisecond timeout. Round sub-ms
             // durations up, and preserve the original deadline if a very long
             // timeout needs more than one poll call.
             let timeout_ms = remaining.as_millis().clamp(1, u16::MAX as u128) as u16;
-            let ready = poll(&mut poll_fds, PollTimeout::from(timeout_ms))?;
+            let ready = poll(&mut poll_fds, PollTimeout::from(timeout_ms))
+                .map_err(|error| CaptureReadError::Io(error.into()))?;
             if ready == 0 {
                 if Instant::now() >= deadline {
-                    return Err(io::Error::new(io::ErrorKind::TimedOut, "capture timeout"));
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "capture timeout").into());
                 }
                 continue;
             }
@@ -544,13 +554,13 @@ impl CaptureStream {
             if let Some(subdev_fd) = self.subdev_fd.as_ref() {
                 if let Some(revents) = poll_fds.get(1).and_then(|f| f.revents()) {
                     if revents.contains(PollFlags::POLLPRI) {
-                        let drained = drain_events(subdev_fd);
+                        let drained = csi_bridge::drain_v4l2_events(subdev_fd);
                         info!(
                             "Subdev SOURCE_CHANGE detected (drained {} event(s)), \
                              requesting stream re-open",
                             drained
                         );
-                        return Err(io::Error::other(SOURCE_CHANGED_MARKER));
+                        return Err(CaptureReadError::SourceChanged);
                     }
                 }
             }
@@ -561,10 +571,10 @@ impl CaptureStream {
                         "capture poll: video revents={:?} (ERR/HUP) — requesting stream re-open",
                         revents
                     );
-                    return Err(io::Error::other(SOURCE_CHANGED_MARKER));
+                    return Err(CaptureReadError::SourceChanged);
                 }
                 if revents.contains(PollFlags::POLLPRI) {
-                    let drained = drain_events(&self.fd);
+                    let drained = csi_bridge::drain_v4l2_events(&self.fd);
                     if self.native_hdmirx_state_unchanged() {
                         debug!(
                             "Ignoring {} spurious native HDMI RX SOURCE_CHANGE event(s): active format/timings are unchanged",
@@ -580,7 +590,7 @@ impl CaptureStream {
                          requesting stream re-open",
                         drained
                     );
-                    return Err(io::Error::other(SOURCE_CHANGED_MARKER));
+                    return Err(CaptureReadError::SourceChanged);
                 }
                 if !revents.contains(PollFlags::POLLIN) {
                     // rkcif + RK628: the driver may wake `poll` after internally
@@ -590,7 +600,7 @@ impl CaptureStream {
                         "capture poll: ready={} video revents={:?} (no POLLIN) — requesting stream re-open",
                         ready, revents
                     );
-                    return Err(io::Error::other(SOURCE_CHANGED_MARKER));
+                    return Err(CaptureReadError::SourceChanged);
                 }
                 return Ok(());
             }
@@ -599,7 +609,7 @@ impl CaptureStream {
                 "capture poll: ready={} but video revents unavailable — requesting stream re-open",
                 ready
             );
-            return Err(io::Error::other(SOURCE_CHANGED_MARKER));
+            return Err(CaptureReadError::SourceChanged);
         }
     }
 
@@ -702,20 +712,6 @@ impl Drop for CaptureStream {
             debug!("Failed to release capture buffers: {}", e);
         }
     }
-}
-
-/// Drain any pending `V4L2_EVENT_*` events on `fd`.  Used after POLLPRI to
-/// clear the queue so the next poll doesn't immediately wake up on stale
-/// state.  Capped at 16 events per call.
-fn drain_events(fd: &File) -> u32 {
-    let mut drained = 0u32;
-    while let Ok(_ev) = ioctl::dqevent::<V4l2Event>(fd) {
-        drained = drained.saturating_add(1);
-        if drained >= 16 {
-            break;
-        }
-    }
-    drained
 }
 
 /// Result of a successful `VIDIOC_QUERY_DV_TIMINGS` + `VIDIOC_S_DV_TIMINGS`
@@ -937,7 +933,7 @@ fn set_fps(fd: &File, queue: QueueType, fps: u32) -> std::result::Result<(), ioc
 
 #[cfg(test)]
 mod tests {
-    use super::{DvTimingsSignature, NativeHdmirxState};
+    use super::{open_capture_device, DvTimingsSignature, NativeHdmirxState};
     use crate::video::format::PixelFormat;
 
     fn timing() -> DvTimingsSignature {
@@ -985,5 +981,15 @@ mod tests {
             ..state
         };
         assert_eq!(no_timing_state.timings_match(None), Some(true));
+    }
+
+    #[test]
+    fn capture_device_handles_are_non_blocking() {
+        let temp = tempfile::NamedTempFile::new().expect("create temporary device file");
+        let opened = open_capture_device(temp.path()).expect("open capture device");
+        let flags =
+            nix::fcntl::fcntl(&opened, nix::fcntl::FcntlArg::F_GETFL).expect("read file flags");
+
+        assert_ne!(flags & libc::O_NONBLOCK, 0);
     }
 }

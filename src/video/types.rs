@@ -17,6 +17,6 @@ pub use super::codec::registry::{EncoderBackend, VideoEncoderType};
 
 // From video::pipeline
 pub use super::pipeline::{
-    EncodedVideoFrame, PipelineAppliedConfig, PipelineStateNotification, SharedVideoPipeline,
-    SharedVideoPipelineConfig, SharedVideoPipelineStats,
+    EncodedVideoFrame, PipelineAppliedConfig, PipelineLifecycle, PipelineStateNotification,
+    SharedVideoPipeline, SharedVideoPipelineConfig, SharedVideoPipelineStats,
 };
