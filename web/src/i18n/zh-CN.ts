@@ -1029,6 +1029,10 @@ export default {
     easytier: {
       title: 'Easytier 组网',
       desc: '通过 EasyTier 实现 P2P VPN 组网',
+      quickConfig: '快速配置',
+      fullConfig: '完整配置',
+      fullConfigHint: '可在此粘贴完整的 easytier.toml 配置文件',
+      fullConfigRequired: '请填写完整 easytier.toml 配置',
       networkName: '网络名称',
       networkNameRequired: '请填写 EasyTier 网络名称',
       networkSecret: '网络密钥',

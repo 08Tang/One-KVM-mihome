@@ -54,7 +54,7 @@ import type {
   OtgNetworkStatus,
   WatchdogConfigResponse,
 } from '@/types/generated'
-import { FrpProxyType, FrpcConfigMode } from '@/types/generated'
+import { EasytierConfigMode, FrpProxyType, FrpcConfigMode } from '@/types/generated'
 import { toConfigFps } from '@/lib/fps'
 import { useClipboard } from '@/composables/useClipboard'
 import { useFeatureVisibility } from '@/composables/useFeatureVisibility'
@@ -67,6 +67,7 @@ import LanguageToggleButton from '@/components/LanguageToggleButton.vue'
 import TerminalDialog from '@/components/TerminalDialog.vue'
 import TotpSettingsCard from '@/components/TotpSettingsCard.vue'
 import VideoInputFields from '@/components/VideoInputFields.vue'
+import ExtensionConfigModeEditor from '@/components/ExtensionConfigModeEditor.vue'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -76,7 +77,6 @@ import { Separator } from '@/components/ui/separator'
 import { Badge } from '@/components/ui/badge'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { ButtonGroup } from '@/components/ui/button-group'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia } from '@/components/ui/empty'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -427,7 +427,15 @@ const showTerminalDialog = ref(false)
 const extConfig = ref({
   ttyd: { enabled: false, shell: '/bin/bash' },
   gostc: { enabled: false, addr: '', key: '', tls: true },
-  easytier: { enabled: false, network_name: '', network_secret: '', peer_urls: [] as string[], virtual_ip: '' },
+  easytier: {
+    enabled: false,
+    config_mode: EasytierConfigMode.Quick,
+    network_name: '',
+    network_secret: '',
+    peer_urls: [] as string[],
+    virtual_ip: '',
+    custom_toml: '',
+  },
   frpc: {
     enabled: false,
     config_mode: FrpcConfigMode.Quick,
@@ -453,6 +461,10 @@ const gostcValidationMessage = computed(() => {
 })
 
 const easytierValidationMessage = computed(() => {
+  if (extConfig.value.easytier.config_mode === EasytierConfigMode.Full) {
+    if (!extConfig.value.easytier.custom_toml?.trim()) return t('extensions.easytier.fullConfigRequired')
+    return ''
+  }
   if (!extConfig.value.easytier.network_name?.trim()) return t('extensions.easytier.networkNameRequired')
   return ''
 })
@@ -1629,10 +1641,12 @@ async function loadExtensions() {
       const easytier = extensions.value.easytier.config
       extConfig.value.easytier = {
         enabled: easytier.enabled,
+        config_mode: easytier.config_mode || EasytierConfigMode.Quick,
         network_name: easytier.network_name,
         network_secret: easytier.network_secret,
         peer_urls: easytier.peer_urls || [],
         virtual_ip: easytier.virtual_ip || '',
+        custom_toml: easytier.custom_toml || '',
       }
       const frpc = extensions.value.frpc.config
       extConfig.value.frpc = {
@@ -1690,6 +1704,7 @@ async function refreshExtensionLogs(id: ExtensionConfigId) {
 async function saveExtensionConfig(id: ExtensionConfigId) {
   if (id !== 'ttyd') {
     const shouldValidate = extConfig.value[id].enabled
+      || (id === 'easytier' && extConfig.value.easytier.config_mode === EasytierConfigMode.Full)
       || (id === 'frpc' && extConfig.value.frpc.config_mode === FrpcConfigMode.Full)
     if (shouldValidate && !validateExtensionConfig(id)) return
   }
@@ -4516,38 +4531,50 @@ watch(isWindows, () => {
                       <Label>{{ t('extensions.autoStart') }}</Label>
                       <Switch v-model="extConfig.easytier.enabled" :disabled="isExtRunning(extensions?.easytier?.status)" />
                     </div>
-                    <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
-                      <Label class="sm:text-right">{{ t('extensions.easytier.networkName') }}</Label>
-                      <div class="sm:col-span-3 space-y-1">
-                        <Input v-model="extConfig.easytier.network_name" :disabled="isExtRunning(extensions?.easytier?.status)" />
-                        <p v-if="extConfig.easytier.enabled && !extConfig.easytier.network_name?.trim()" class="text-xs text-destructive">{{ t('extensions.easytier.networkNameRequired') }}</p>
-                      </div>
-                    </div>
-                    <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
-                      <Label class="sm:text-right">{{ t('extensions.easytier.networkSecret') }}</Label>
-                      <Input v-model="extConfig.easytier.network_secret" type="password" autocomplete="off" class="sm:col-span-3" :disabled="isExtRunning(extensions?.easytier?.status)" />
-                    </div>
-                    <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
-                      <Label class="sm:text-right">{{ t('extensions.easytier.peers') }}</Label>
-                      <div class="sm:col-span-3 space-y-2">
-                        <div v-for="(_, i) in extConfig.easytier.peer_urls" :key="i" class="flex gap-2">
-                          <Input v-model="extConfig.easytier.peer_urls[i]" placeholder="tcp://1.2.3.4:11010" :disabled="isExtRunning(extensions?.easytier?.status)" />
-                          <Button variant="ghost" size="icon" :aria-label="t('common.delete')" @click="removeEasytierPeer(i)" :disabled="isExtRunning(extensions?.easytier?.status)">
-                            <Trash2 class="size-4" />
-                          </Button>
+                    <ExtensionConfigModeEditor
+                      v-model:mode="extConfig.easytier.config_mode"
+                      v-model:config="extConfig.easytier.custom_toml"
+                      :disabled="isExtRunning(extensions?.easytier?.status)"
+                      :quick-label="t('extensions.easytier.quickConfig')"
+                      :full-label="t('extensions.easytier.fullConfig')"
+                      :full-config-hint="t('extensions.easytier.fullConfigHint')"
+                      :full-config-required="t('extensions.easytier.fullConfigRequired')"
+                    >
+                      <template #quick>
+                        <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
+                          <Label class="sm:text-right">{{ t('extensions.easytier.networkName') }}</Label>
+                          <div class="sm:col-span-3 space-y-1">
+                            <Input v-model="extConfig.easytier.network_name" :disabled="isExtRunning(extensions?.easytier?.status)" />
+                            <p v-if="extConfig.easytier.enabled && !extConfig.easytier.network_name?.trim()" class="text-xs text-destructive">{{ t('extensions.easytier.networkNameRequired') }}</p>
+                          </div>
                         </div>
-                        <Button variant="outline" size="sm" @click="addEasytierPeer" :disabled="isExtRunning(extensions?.easytier?.status)">
-                          <Plus class="size-4 mr-1" />
-                          {{ t('extensions.easytier.addPeer') }}
-                        </Button>
-                      </div>
-                    </div>
-                    <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
-                      <Label class="sm:text-right">{{ t('extensions.easytier.virtualIp') }}</Label>
-                      <div class="sm:col-span-3 space-y-1">
-                        <Input v-model="extConfig.easytier.virtual_ip" placeholder="10.0.0.1/24" :disabled="isExtRunning(extensions?.easytier?.status)" />
-                      </div>
-                    </div>
+                        <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
+                          <Label class="sm:text-right">{{ t('extensions.easytier.networkSecret') }}</Label>
+                          <Input v-model="extConfig.easytier.network_secret" type="password" autocomplete="off" class="sm:col-span-3" :disabled="isExtRunning(extensions?.easytier?.status)" />
+                        </div>
+                        <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
+                          <Label class="sm:text-right">{{ t('extensions.easytier.peers') }}</Label>
+                          <div class="sm:col-span-3 space-y-2">
+                            <div v-for="(_, i) in extConfig.easytier.peer_urls" :key="i" class="flex gap-2">
+                              <Input v-model="extConfig.easytier.peer_urls[i]" placeholder="tcp://1.2.3.4:11010" :disabled="isExtRunning(extensions?.easytier?.status)" />
+                              <Button variant="ghost" size="icon" :aria-label="t('common.delete')" @click="removeEasytierPeer(i)" :disabled="isExtRunning(extensions?.easytier?.status)">
+                                <Trash2 class="size-4" />
+                              </Button>
+                            </div>
+                            <Button variant="outline" size="sm" @click="addEasytierPeer" :disabled="isExtRunning(extensions?.easytier?.status)">
+                              <Plus class="size-4 mr-1" />
+                              {{ t('extensions.easytier.addPeer') }}
+                            </Button>
+                          </div>
+                        </div>
+                        <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
+                          <Label class="sm:text-right">{{ t('extensions.easytier.virtualIp') }}</Label>
+                          <div class="sm:col-span-3 space-y-1">
+                            <Input v-model="extConfig.easytier.virtual_ip" placeholder="10.0.0.1/24" :disabled="isExtRunning(extensions?.easytier?.status)" />
+                          </div>
+                        </div>
+                      </template>
+                    </ExtensionConfigModeEditor>
                   </div>
                   <!-- Logs -->
                   <div class="space-y-2">
@@ -4621,104 +4648,86 @@ watch(isWindows, () => {
                       <Label>{{ t('extensions.autoStart') }}</Label>
                       <Switch v-model="extConfig.frpc.enabled" :disabled="isExtRunning(extensions?.frpc?.status)" />
                     </div>
-                    <ButtonGroup class="grid w-full grid-cols-2">
-                      <Button
-                        type="button"
-                        :variant="frpcQuickMode ? 'default' : 'outline'"
-                        :disabled="isExtRunning(extensions?.frpc?.status)"
-                        @click="extConfig.frpc.config_mode = FrpcConfigMode.Quick"
-                      >
-                        {{ t('extensions.frpc.quickConfig') }}
-                      </Button>
-                      <Button
-                        type="button"
-                        :variant="!frpcQuickMode ? 'default' : 'outline'"
-                        :disabled="isExtRunning(extensions?.frpc?.status)"
-                        @click="extConfig.frpc.config_mode = FrpcConfigMode.Full"
-                      >
-                        {{ t('extensions.frpc.fullConfig') }}
-                      </Button>
-                    </ButtonGroup>
-                    <template v-if="frpcQuickMode">
-                      <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
-                        <Label class="sm:text-right">{{ t('extensions.frpc.proxyType') }}</Label>
-                        <div class="sm:col-span-3">
-                          <RadioGroup v-model="extConfig.frpc.proxy_type" class="flex flex-wrap gap-4" :disabled="isExtRunning(extensions?.frpc?.status)">
-                            <div v-for="type in ['tcp', 'udp', 'http', 'https', 'stcp', 'sudp', 'xtcp']" :key="type" class="flex items-center space-x-2">
-                              <RadioGroupItem :value="type" :id="`frpc-${type}`" />
-                              <Label :for="`frpc-${type}`" class="cursor-pointer uppercase">{{ type }}</Label>
-                            </div>
-                          </RadioGroup>
+                    <ExtensionConfigModeEditor
+                      v-model:mode="extConfig.frpc.config_mode"
+                      v-model:config="extConfig.frpc.custom_toml"
+                      :disabled="isExtRunning(extensions?.frpc?.status)"
+                      :quick-label="t('extensions.frpc.quickConfig')"
+                      :full-label="t('extensions.frpc.fullConfig')"
+                      :full-config-hint="t('extensions.frpc.fullConfigHint')"
+                      :full-config-required="t('extensions.frpc.fullConfigRequired')"
+                    >
+                      <template #quick>
+                        <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
+                          <Label class="sm:text-right">{{ t('extensions.frpc.proxyType') }}</Label>
+                          <div class="sm:col-span-3">
+                            <RadioGroup v-model="extConfig.frpc.proxy_type" class="flex flex-wrap gap-4" :disabled="isExtRunning(extensions?.frpc?.status)">
+                              <div v-for="type in ['tcp', 'udp', 'http', 'https', 'stcp', 'sudp', 'xtcp']" :key="type" class="flex items-center space-x-2">
+                                <RadioGroupItem :value="type" :id="`frpc-${type}`" />
+                                <Label :for="`frpc-${type}`" class="cursor-pointer uppercase">{{ type }}</Label>
+                              </div>
+                            </RadioGroup>
+                          </div>
                         </div>
-                      </div>
-                      <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
-                        <Label class="sm:text-right">{{ t('extensions.frpc.proxyName') }}</Label>
-                        <div class="sm:col-span-3 space-y-1">
-                          <Input v-model="extConfig.frpc.proxy_name" :placeholder="t('extensions.frpc.proxyNamePlaceholder')" :disabled="isExtRunning(extensions?.frpc?.status)" />
-                          <p v-if="extConfig.frpc.enabled && !extConfig.frpc.proxy_name?.trim()" class="text-xs text-destructive">{{ t('extensions.frpc.proxyNameRequired') }}</p>
+                        <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
+                          <Label class="sm:text-right">{{ t('extensions.frpc.proxyName') }}</Label>
+                          <div class="sm:col-span-3 space-y-1">
+                            <Input v-model="extConfig.frpc.proxy_name" :placeholder="t('extensions.frpc.proxyNamePlaceholder')" :disabled="isExtRunning(extensions?.frpc?.status)" />
+                            <p v-if="extConfig.frpc.enabled && !extConfig.frpc.proxy_name?.trim()" class="text-xs text-destructive">{{ t('extensions.frpc.proxyNameRequired') }}</p>
+                          </div>
                         </div>
-                      </div>
-                      <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
-                        <Label class="sm:text-right">{{ t('extensions.frpc.serverAddr') }}</Label>
-                        <div class="sm:col-span-3 space-y-1">
-                          <Input v-model="extConfig.frpc.server_addr" :placeholder="t('extensions.frpc.serverAddrPlaceholder')" :disabled="isExtRunning(extensions?.frpc?.status)" />
-                          <p v-if="extConfig.frpc.enabled && !extConfig.frpc.server_addr?.trim()" class="text-xs text-destructive">{{ t('extensions.frpc.serverAddrRequired') }}</p>
+                        <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
+                          <Label class="sm:text-right">{{ t('extensions.frpc.serverAddr') }}</Label>
+                          <div class="sm:col-span-3 space-y-1">
+                            <Input v-model="extConfig.frpc.server_addr" :placeholder="t('extensions.frpc.serverAddrPlaceholder')" :disabled="isExtRunning(extensions?.frpc?.status)" />
+                            <p v-if="extConfig.frpc.enabled && !extConfig.frpc.server_addr?.trim()" class="text-xs text-destructive">{{ t('extensions.frpc.serverAddrRequired') }}</p>
+                          </div>
                         </div>
-                      </div>
-                      <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
-                        <Label class="sm:text-right">{{ t('extensions.frpc.serverPort') }}</Label>
-                        <Input v-model.number="extConfig.frpc.server_port" class="sm:col-span-3" type="number" min="1" max="65535" :disabled="isExtRunning(extensions?.frpc?.status)" />
-                      </div>
-                      <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
-                        <Label class="sm:text-right">{{ t('extensions.frpc.token') }}</Label>
-                        <div class="sm:col-span-3 space-y-1">
-                          <Input v-model="extConfig.frpc.token" type="password" autocomplete="off" :disabled="isExtRunning(extensions?.frpc?.status)" />
-                          <p v-if="extConfig.frpc.enabled && !extConfig.frpc.token" class="text-xs text-destructive">{{ t('extensions.frpc.tokenRequired') }}</p>
+                        <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
+                          <Label class="sm:text-right">{{ t('extensions.frpc.serverPort') }}</Label>
+                          <Input v-model.number="extConfig.frpc.server_port" class="sm:col-span-3" type="number" min="1" max="65535" :disabled="isExtRunning(extensions?.frpc?.status)" />
                         </div>
-                      </div>
-                      <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
-                        <Label class="sm:text-right">{{ t('extensions.frpc.localIp') }}</Label>
-                        <div class="sm:col-span-3 space-y-1">
-                          <Input v-model="extConfig.frpc.local_ip" placeholder="127.0.0.1" :disabled="isExtRunning(extensions?.frpc?.status)" />
-                          <p v-if="extConfig.frpc.enabled && !extConfig.frpc.local_ip?.trim()" class="text-xs text-destructive">{{ t('extensions.frpc.localIpRequired') }}</p>
+                        <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
+                          <Label class="sm:text-right">{{ t('extensions.frpc.token') }}</Label>
+                          <div class="sm:col-span-3 space-y-1">
+                            <Input v-model="extConfig.frpc.token" type="password" autocomplete="off" :disabled="isExtRunning(extensions?.frpc?.status)" />
+                            <p v-if="extConfig.frpc.enabled && !extConfig.frpc.token" class="text-xs text-destructive">{{ t('extensions.frpc.tokenRequired') }}</p>
+                          </div>
                         </div>
-                      </div>
-                      <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
-                        <Label class="sm:text-right">{{ t('extensions.frpc.localPort') }}</Label>
-                        <Input v-model.number="extConfig.frpc.local_port" class="sm:col-span-3" type="number" min="1" max="65535" :disabled="isExtRunning(extensions?.frpc?.status)" />
-                      </div>
-                      <div v-if="showFrpcRemotePort" class="grid gap-2 sm:grid-cols-4 sm:items-center">
-                        <Label class="sm:text-right">{{ t('extensions.frpc.remotePort') }}</Label>
-                        <div class="sm:col-span-3 space-y-1">
-                          <Input v-model.number="extConfig.frpc.remote_port" type="number" min="1" max="65535" :disabled="isExtRunning(extensions?.frpc?.status)" />
-                          <p v-if="extConfig.frpc.enabled && frpcRemotePortRequired && !extConfig.frpc.remote_port" class="text-xs text-destructive">{{ t('extensions.frpc.remotePortRequired') }}</p>
+                        <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
+                          <Label class="sm:text-right">{{ t('extensions.frpc.localIp') }}</Label>
+                          <div class="sm:col-span-3 space-y-1">
+                            <Input v-model="extConfig.frpc.local_ip" placeholder="127.0.0.1" :disabled="isExtRunning(extensions?.frpc?.status)" />
+                            <p v-if="extConfig.frpc.enabled && !extConfig.frpc.local_ip?.trim()" class="text-xs text-destructive">{{ t('extensions.frpc.localIpRequired') }}</p>
+                          </div>
                         </div>
-                      </div>
-                      <div v-if="showFrpcCustomDomain" class="grid gap-2 sm:grid-cols-4 sm:items-center">
-                        <Label class="sm:text-right">{{ t('extensions.frpc.customDomain') }}</Label>
-                        <Input v-model="extConfig.frpc.custom_domain" class="sm:col-span-3" :placeholder="t('extensions.frpc.customDomainPlaceholder')" :disabled="isExtRunning(extensions?.frpc?.status)" />
-                      </div>
-                      <div v-if="showFrpcSecretKey" class="grid gap-2 sm:grid-cols-4 sm:items-center">
-                        <Label class="sm:text-right">{{ t('extensions.frpc.secretKey') }}</Label>
-                        <Input v-model="extConfig.frpc.secret_key" class="sm:col-span-3" type="password" autocomplete="off" :disabled="isExtRunning(extensions?.frpc?.status)" />
-                      </div>
-                      <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
-                        <Label class="sm:text-right">{{ t('extensions.frpc.tls') }}</Label>
-                        <div class="sm:col-span-3">
-                          <Switch v-model="extConfig.frpc.tls" :disabled="isExtRunning(extensions?.frpc?.status)" />
+                        <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
+                          <Label class="sm:text-right">{{ t('extensions.frpc.localPort') }}</Label>
+                          <Input v-model.number="extConfig.frpc.local_port" class="sm:col-span-3" type="number" min="1" max="65535" :disabled="isExtRunning(extensions?.frpc?.status)" />
                         </div>
-                      </div>
-                    </template>
-                    <div v-else class="space-y-1">
-                      <Textarea
-                        v-model="extConfig.frpc.custom_toml"
-                        class="min-h-[300px] font-mono text-xs"
-                        spellcheck="false"
-                        :disabled="isExtRunning(extensions?.frpc?.status)"
-                      />
-                      <p class="text-xs text-muted-foreground">{{ t('extensions.frpc.fullConfigHint') }}</p>
-                      <p v-if="!extConfig.frpc.custom_toml?.trim()" class="text-xs text-destructive">{{ t('extensions.frpc.fullConfigRequired') }}</p>
-                    </div>
+                        <div v-if="showFrpcRemotePort" class="grid gap-2 sm:grid-cols-4 sm:items-center">
+                          <Label class="sm:text-right">{{ t('extensions.frpc.remotePort') }}</Label>
+                          <div class="sm:col-span-3 space-y-1">
+                            <Input v-model.number="extConfig.frpc.remote_port" type="number" min="1" max="65535" :disabled="isExtRunning(extensions?.frpc?.status)" />
+                            <p v-if="extConfig.frpc.enabled && frpcRemotePortRequired && !extConfig.frpc.remote_port" class="text-xs text-destructive">{{ t('extensions.frpc.remotePortRequired') }}</p>
+                          </div>
+                        </div>
+                        <div v-if="showFrpcCustomDomain" class="grid gap-2 sm:grid-cols-4 sm:items-center">
+                          <Label class="sm:text-right">{{ t('extensions.frpc.customDomain') }}</Label>
+                          <Input v-model="extConfig.frpc.custom_domain" class="sm:col-span-3" :placeholder="t('extensions.frpc.customDomainPlaceholder')" :disabled="isExtRunning(extensions?.frpc?.status)" />
+                        </div>
+                        <div v-if="showFrpcSecretKey" class="grid gap-2 sm:grid-cols-4 sm:items-center">
+                          <Label class="sm:text-right">{{ t('extensions.frpc.secretKey') }}</Label>
+                          <Input v-model="extConfig.frpc.secret_key" class="sm:col-span-3" type="password" autocomplete="off" :disabled="isExtRunning(extensions?.frpc?.status)" />
+                        </div>
+                        <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
+                          <Label class="sm:text-right">{{ t('extensions.frpc.tls') }}</Label>
+                          <div class="sm:col-span-3">
+                            <Switch v-model="extConfig.frpc.tls" :disabled="isExtRunning(extensions?.frpc?.status)" />
+                          </div>
+                        </div>
+                      </template>
+                    </ExtensionConfigModeEditor>
                   </div>
                   <div class="space-y-2">
                     <Collapsible v-model:open="showLogs.frpc" @update:open="open => open && refreshExtensionLogs('frpc')">

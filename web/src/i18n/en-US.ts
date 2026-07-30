@@ -1030,6 +1030,10 @@ export default {
     easytier: {
       title: 'Easytier Network',
       desc: 'P2P VPN networking via EasyTier',
+      quickConfig: 'Quick Config',
+      fullConfig: 'Full Config',
+      fullConfigHint: 'Paste the full easytier.toml configuration file here',
+      fullConfigRequired: 'Enter the full easytier.toml configuration',
       networkName: 'Network Name',
       networkNameRequired: 'Enter the EasyTier network name',
       networkSecret: 'Network Secret',

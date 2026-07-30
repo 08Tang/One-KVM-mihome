@@ -1,15 +1,15 @@
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
 
-use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::RwLock;
-use toml_edit::DocumentMut;
 
+use super::protected_config::ProtectedConfigFile;
 use super::types::*;
+use super::validation::{validate_easytier_config, validate_frpc_config, validate_gostc_config};
 use crate::events::EventBus;
 
 const LOG_BUFFER_SIZE: usize = 200;
@@ -27,12 +27,12 @@ const TTYD_TCP_PORT: &str = "7681";
 struct ExtensionProcess {
     child: Child,
     logs: Arc<RwLock<VecDeque<String>>>,
-    _temp_dir: Option<TempDir>,
+    _config_file: Option<ProtectedConfigFile>,
 }
 
 struct ExtensionLaunch {
     args: Vec<String>,
-    temp_dir: Option<TempDir>,
+    config_file: Option<ProtectedConfigFile>,
 }
 
 pub struct ExtensionManager {
@@ -83,24 +83,12 @@ impl ExtensionManager {
         match id {
             ExtensionId::Ttyd => config.ttyd.enabled,
             ExtensionId::Gostc => {
-                config.gostc.enabled
-                    && !config.gostc.key.is_empty()
-                    && !config.gostc.addr.trim().is_empty()
+                config.gostc.enabled && validate_gostc_config(&config.gostc).is_ok()
             }
             ExtensionId::Easytier => {
-                config.easytier.enabled && !config.easytier.network_name.is_empty()
+                config.easytier.enabled && validate_easytier_config(&config.easytier).is_ok()
             }
-            ExtensionId::Frpc => {
-                config.frpc.enabled
-                    && match config.frpc.config_mode {
-                        FrpcConfigMode::Quick => {
-                            !config.frpc.proxy_name.trim().is_empty()
-                                && !config.frpc.server_addr.trim().is_empty()
-                                && !config.frpc.token.is_empty()
-                        }
-                        FrpcConfigMode::Full => !config.frpc.custom_toml.trim().is_empty(),
-                    }
-            }
+            ExtensionId::Frpc => config.frpc.enabled && validate_frpc_config(&config.frpc).is_ok(),
         }
     }
 
@@ -203,7 +191,7 @@ impl ExtensionManager {
             ExtensionProcess {
                 child,
                 logs,
-                _temp_dir: launch.temp_dir,
+                _config_file: launch.config_file,
             },
         );
         drop(processes);
@@ -286,12 +274,7 @@ impl ExtensionManager {
 
             ExtensionId::Gostc => {
                 let c = &config.gostc;
-                if c.addr.trim().is_empty() {
-                    return Err("GOSTC server address is required".into());
-                }
-                if c.key.is_empty() {
-                    return Err("GOSTC client key is required".into());
-                }
+                validate_gostc_config(c)?;
 
                 let mut args = Vec::new();
 
@@ -307,35 +290,7 @@ impl ExtensionManager {
             }
 
             ExtensionId::Easytier => {
-                let c = &config.easytier;
-                if c.network_name.is_empty() {
-                    return Err("EasyTier network name is required".into());
-                }
-
-                let mut args = vec![
-                    "--network-name".to_string(),
-                    c.network_name.clone(),
-                    "--network-secret".to_string(),
-                    c.network_secret.clone(),
-                ];
-
-                for peer in &c.peer_urls {
-                    if !peer.is_empty() {
-                        args.extend(["--peers".to_string(), peer.clone()]);
-                    }
-                }
-
-                if let Some(ref ip) = c.virtual_ip {
-                    if !ip.is_empty() {
-                        args.extend(["-i".to_string(), ip.clone()]);
-                    } else {
-                        args.push("-d".to_string());
-                    }
-                } else {
-                    args.push("-d".to_string());
-                }
-
-                args
+                return Self::build_easytier_launch(&config.easytier).await;
             }
 
             ExtensionId::Frpc => {
@@ -345,56 +300,76 @@ impl ExtensionManager {
 
         Ok(ExtensionLaunch {
             args,
-            temp_dir: None,
+            config_file: None,
         })
+    }
+
+    async fn build_easytier_launch(config: &EasytierConfig) -> Result<ExtensionLaunch, String> {
+        validate_easytier_config(config)?;
+
+        match config.config_mode {
+            EasytierConfigMode::Quick => Ok(ExtensionLaunch {
+                args: Self::build_easytier_quick_args(config),
+                config_file: None,
+            }),
+            EasytierConfigMode::Full => {
+                let config_file = ProtectedConfigFile::create(
+                    "EasyTier",
+                    "easytier.toml",
+                    config.custom_toml.as_str(),
+                )
+                .await?;
+
+                Ok(ExtensionLaunch {
+                    args: vec!["-c".to_string(), Self::path_to_arg(config_file.path())],
+                    config_file: Some(config_file),
+                })
+            }
+        }
+    }
+
+    fn build_easytier_quick_args(config: &EasytierConfig) -> Vec<String> {
+        let mut args = vec![
+            "--network-name".to_string(),
+            config.network_name.clone(),
+            "--network-secret".to_string(),
+            config.network_secret.clone(),
+        ];
+
+        for peer in &config.peer_urls {
+            if !peer.is_empty() {
+                args.extend(["--peers".to_string(), peer.clone()]);
+            }
+        }
+
+        if let Some(ref ip) = config.virtual_ip {
+            if !ip.is_empty() {
+                args.extend(["-i".to_string(), ip.clone()]);
+            } else {
+                args.push("-d".to_string());
+            }
+        } else {
+            args.push("-d".to_string());
+        }
+
+        args
     }
 
     async fn build_frpc_launch(config: &FrpcConfig) -> Result<ExtensionLaunch, String> {
+        validate_frpc_config(config)?;
+
         let config_text = match config.config_mode {
             FrpcConfigMode::Quick => Self::build_frpc_quick_toml(config)?,
-            FrpcConfigMode::Full => Self::validate_frpc_full_toml(config)?.to_string(),
+            FrpcConfigMode::Full => config.custom_toml.clone(),
         };
 
-        let temp_dir =
-            tempfile::tempdir().map_err(|e| format!("Failed to create FRPC config dir: {}", e))?;
-        let config_path = temp_dir.path().join("frpc.toml");
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(temp_dir.path(), std::fs::Permissions::from_mode(0o700))
-                .map_err(|e| format!("Failed to protect FRPC config dir: {}", e))?;
-        }
-
-        tokio::fs::write(&config_path, config_text)
-            .await
-            .map_err(|e| format!("Failed to write FRPC config: {}", e))?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            tokio::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600))
-                .await
-                .map_err(|e| format!("Failed to protect FRPC config: {}", e))?;
-        }
+        let config_file =
+            ProtectedConfigFile::create("FRPC", "frpc.toml", config_text.as_str()).await?;
 
         Ok(ExtensionLaunch {
-            args: vec!["-c".to_string(), Self::path_to_arg(&config_path)],
-            temp_dir: Some(temp_dir),
+            args: vec!["-c".to_string(), Self::path_to_arg(config_file.path())],
+            config_file: Some(config_file),
         })
-    }
-
-    fn validate_frpc_full_toml(config: &FrpcConfig) -> Result<&str, String> {
-        let trimmed = config.custom_toml.trim();
-        if trimmed.is_empty() {
-            return Err("FRPC full configuration is required".into());
-        }
-
-        trimmed
-            .parse::<DocumentMut>()
-            .map_err(|e| format!("FRPC full configuration is not valid TOML: {}", e))?;
-
-        Ok(config.custom_toml.as_str())
     }
 
     fn build_frpc_quick_toml(config: &FrpcConfig) -> Result<String, String> {
@@ -480,7 +455,7 @@ impl ExtensionManager {
         serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
     }
 
-    fn path_to_arg(path: &PathBuf) -> String {
+    fn path_to_arg(path: &Path) -> String {
         path.to_string_lossy().to_string()
     }
 
@@ -601,5 +576,109 @@ impl ExtensionManager {
     pub async fn stop_all(&self) {
         let stop_futures: Vec<_> = ExtensionId::all().iter().map(|id| self.stop(*id)).collect();
         futures::future::join_all(stop_futures).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn easytier_launch_revalidates_full_configuration() {
+        let config = EasytierConfig {
+            config_mode: EasytierConfigMode::Full,
+            custom_toml: "instance_name = [".to_string(),
+            ..Default::default()
+        };
+
+        let error = ExtensionManager::build_easytier_launch(&config)
+            .await
+            .err()
+            .expect("invalid full configuration should fail launch validation");
+        assert!(error.starts_with("EasyTier full configuration is not valid TOML:"));
+    }
+
+    #[test]
+    fn easytier_quick_mode_keeps_command_line_arguments() {
+        let config = EasytierConfig {
+            network_name: "one-kvm".to_string(),
+            network_secret: "secret".to_string(),
+            peer_urls: vec![
+                "tcp://peer-one:11010".to_string(),
+                String::new(),
+                "udp://peer-two:11010".to_string(),
+            ],
+            virtual_ip: Some("10.20.30.40/24".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            ExtensionManager::build_easytier_quick_args(&config),
+            vec![
+                "--network-name",
+                "one-kvm",
+                "--network-secret",
+                "secret",
+                "--peers",
+                "tcp://peer-one:11010",
+                "--peers",
+                "udp://peer-two:11010",
+                "-i",
+                "10.20.30.40/24",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn easytier_full_mode_uses_protected_temporary_config() {
+        let config_text = "instance_name = \"one-kvm\"\n";
+        let config = EasytierConfig {
+            config_mode: EasytierConfigMode::Full,
+            network_name: "ignored-quick-network".to_string(),
+            custom_toml: config_text.to_string(),
+            ..Default::default()
+        };
+
+        let launch = ExtensionManager::build_easytier_launch(&config)
+            .await
+            .expect("full EasyTier launch should build");
+        assert_eq!(launch.args[0], "-c");
+
+        let config_path = std::path::PathBuf::from(&launch.args[1]);
+        assert_eq!(
+            config_path.file_name().and_then(|name| name.to_str()),
+            Some("easytier.toml")
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(&config_path).await.unwrap(),
+            config_text
+        );
+
+        drop(launch);
+        assert!(!config_path.exists());
+    }
+
+    #[test]
+    fn easytier_auto_start_uses_fields_for_selected_mode() {
+        let mut config = ExtensionsConfig::default();
+        config.easytier.enabled = true;
+        config.easytier.network_name = "quick-network".to_string();
+        assert!(ExtensionManager::is_enabled_for_config(
+            ExtensionId::Easytier,
+            &config
+        ));
+
+        config.easytier.config_mode = EasytierConfigMode::Full;
+        assert!(!ExtensionManager::is_enabled_for_config(
+            ExtensionId::Easytier,
+            &config
+        ));
+
+        config.easytier.network_name.clear();
+        config.easytier.custom_toml = "instance_name = \"one-kvm\"".to_string();
+        assert!(ExtensionManager::is_enabled_for_config(
+            ExtensionId::Easytier,
+            &config
+        ));
     }
 }

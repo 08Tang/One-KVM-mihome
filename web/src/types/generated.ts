@@ -194,12 +194,19 @@ export interface GostcConfig {
 	tls: boolean;
 }
 
+export enum EasytierConfigMode {
+	Quick = "quick",
+	Full = "full",
+}
+
 export interface EasytierConfig {
 	enabled: boolean;
+	config_mode: EasytierConfigMode;
 	network_name: string;
 	network_secret: string;
 	peer_urls: string[];
 	virtual_ip?: string;
+	custom_toml: string;
 }
 
 export enum FrpcConfigMode {
@@ -430,10 +437,12 @@ export interface ComputerUseStartRequest {
 
 export interface EasytierConfigUpdate {
 	enabled?: boolean;
+	config_mode?: EasytierConfigMode;
 	network_name?: string;
 	network_secret?: string;
 	peer_urls?: string[];
 	virtual_ip?: string;
+	custom_toml?: string;
 }
 
 export type ExtensionStatus = 
