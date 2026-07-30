@@ -115,6 +115,7 @@ const videoError = ref(false)
 const videoErrorMessage = ref('')
 const videoRestarting = ref(false)
 const mjpegFrameReceived = ref(false)
+let recoveryEventHandled = false
 
 /** From `stream.state_changed`: ok | no_signal | device_lost | device_busy */
 type StreamSignalState = 'ok' | 'no_signal' | 'device_lost' | 'device_busy'
@@ -735,6 +736,8 @@ let webrtcConnectTask: Promise<boolean> | null = null
 
 let webrtcRecoveryTimerId: number | null = null
 let webrtcRecoveryAttempts = 0
+let webrtcReconnectTimeout: ReturnType<typeof setTimeout> | null = null
+let webrtcReconnectFailures = 0
 const MAX_WEBRTC_RECOVERY_ATTEMPTS = 8
 const WEBRTC_RECOVERY_BASE_DELAY = 2000
 
@@ -979,6 +982,11 @@ async function waitForWebRTCReadyGate(reason: string, timeoutMs = 3000): Promise
 }
 
 async function connectWebRTCSerial(reason: string): Promise<boolean> {
+  if (videoMode.value === 'mjpeg') {
+    videoDebugLog('Skipping stale WebRTC connect request in MJPEG mode', { reason })
+    return false
+  }
+
   if (webrtcConnectTask) {
     videoDebugLog('Reusing serialized WebRTC connect task', {
       reason,
@@ -996,6 +1004,10 @@ async function connectWebRTCSerial(reason: string): Promise<boolean> {
   })
   webrtcConnectTask = (async () => {
     await waitForWebRTCReadyGate(reason)
+    if (videoMode.value === 'mjpeg') {
+      videoDebugLog('Discarding WebRTC connect after mode changed to MJPEG', { reason })
+      return false
+    }
     return webrtc.connect()
   })()
 
@@ -1181,13 +1193,36 @@ function cancelWebRTCRecovery() {
   webrtcRecoveryAttempts = 0
 }
 
+async function stopWebRTCClientActivity() {
+  cancelWebRTCRecovery()
+  if (webrtcReconnectTimeout) {
+    clearTimeout(webrtcReconnectTimeout)
+    webrtcReconnectTimeout = null
+  }
+  await webrtc.disconnect()
+}
+
 function handleStreamRecovered(_data: { device: string }) {
   videoDebugLog('Stream recovered event', _data)
   cancelWebRTCRecovery()
+  recoveryEventHandled = true
 
   videoError.value = false
   videoErrorMessage.value = ''
-  refreshVideo()
+  if (videoMode.value === 'mjpeg') {
+    refreshVideo()
+  } else if (webrtc.isConnected.value) {
+    void rebindWebRTCVideo().then(() => {
+      videoLoading.value = false
+    })
+  } else if (!webrtc.isConnecting.value) {
+    void connectWebRTCSerial('stream recovered').then(async connected => {
+      if (connected) {
+        await rebindWebRTCVideo()
+        videoLoading.value = false
+      }
+    })
+  }
 }
 
 async function handleAudioStateChanged(data: { streaming: boolean; device: string | null }) {
@@ -1248,6 +1283,15 @@ async function handleStreamConfigApplied(_data: any) {
     webrtcStage: webrtc.connectStage.value,
   })
   consecutiveErrors = 0
+
+  // A source-following recovery emits `stream.recovered` followed by the
+  // actual geometry. The recovered handler already reconnected the current
+  // transport; do not initiate a second mode switch for the bookkeeping event.
+  if (recoveryEventHandled) {
+    recoveryEventHandled = false
+    videoRestarting.value = false
+    return
+  }
 
   gracePeriodTimeoutId = window.setTimeout(() => {
     gracePeriodTimeoutId = null
@@ -1354,8 +1398,27 @@ function handleStreamStateChanged(data: any) {
   } else if (state === 'no_signal' && videoMode.value !== 'mjpeg') {
     cancelWebRTCRecovery()
     videoRestarting.value = false
+    videoLoading.value = false
     videoError.value = false
     videoErrorMessage.value = ''
+    systemStore.setStreamOnline(false)
+    // Remove the stale decoded frame without closing the peer connection.
+    // The live WebRTC subscription is what keeps a source-following capture
+    // pipeline probing indefinitely; disconnecting here would drop the final
+    // subscriber and make recovery impossible without a page refresh.
+    if (webrtcVideoRef.value) {
+      webrtcVideoRef.value.pause()
+      webrtcVideoRef.value.srcObject = null
+    }
+  } else if (state === 'no_signal' && videoMode.value === 'mjpeg') {
+    systemStore.setStreamOnline(false)
+    videoLoading.value = false
+    mjpegFrameReceived.value = false
+    mjpegTimestamp.value = 0
+    if (videoRef.value) {
+      videoRef.value.src = ''
+      videoRef.value.removeAttribute('src')
+    }
   } else if (state === 'device_busy' && videoMode.value !== 'mjpeg') {
     cancelWebRTCRecovery()
     videoRestarting.value = true
@@ -1378,30 +1441,6 @@ function handleStreamStateChanged(data: any) {
     videoError.value = false
     videoErrorMessage.value = ''
     videoRestarting.value = false
-    if (
-      videoMode.value === 'mjpeg'
-      && (previous === 'no_signal' || previous === 'device_lost' || previous === 'device_busy')
-    ) {
-      refreshVideo()
-    } else if (
-      videoMode.value !== 'mjpeg'
-      && (previous === 'no_signal' || previous === 'device_busy' || previous === 'device_lost')
-    ) {
-      if (webrtc.isConnected.value && !webrtc.isConnecting.value) {
-        void rebindWebRTCVideo().then(() => {
-          videoLoading.value = false
-        })
-      } else if (!webrtc.isConnected.value && !webrtc.isConnecting.value) {
-        void connectWebRTCSerial('stream recovered').then(async (ok) => {
-          if (ok) {
-            await rebindWebRTCVideo()
-            videoLoading.value = false
-          } else if (webrtcRecoveryTimerId === null && webrtcRecoveryAttempts === 0) {
-            scheduleWebRTCRecovery()
-          }
-        })
-      }
-    }
   }
 }
 
@@ -1829,6 +1868,7 @@ async function switchToMJPEG() {
   videoError.value = false
   videoErrorMessage.value = ''
   pendingWebRTCReadyGate = false
+  await stopWebRTCClientActivity()
 
   try {
     const modeResp = await streamApi.setMode('mjpeg')
@@ -1842,10 +1882,6 @@ async function switchToMJPEG() {
     }
   } catch (e) {
     console.error('Failed to switch to MJPEG mode:', e)
-  }
-
-  if (webrtc.isConnected.value || webrtc.sessionId.value) {
-    await webrtc.disconnect()
   }
 
   if (webrtcVideoRef.value) {
@@ -1873,6 +1909,7 @@ function syncToServerMode(mode: VideoMode) {
   if (mode !== 'mjpeg') {
     connectWebRTCOnly(mode)
   } else {
+    void stopWebRTCClientActivity()
     refreshVideo()
   }
 }
@@ -1976,8 +2013,6 @@ watch(webrtc.stats, (stats) => {
   }
 }, { deep: true })
 
-let webrtcReconnectTimeout: ReturnType<typeof setTimeout> | null = null
-let webrtcReconnectFailures = 0
 watch(() => webrtc.state.value, (newState, oldState) => {
   console.log('[WebRTC] State changed:', oldState, '->', newState)
   videoDebugLog('WebRTC state watcher observed change', {

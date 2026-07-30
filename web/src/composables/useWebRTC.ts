@@ -94,6 +94,7 @@ const sessionIdRef = ref<string | null>(null)
 let statsInterval: number | null = null
 let isConnecting = false
 let connectInFlight: Promise<boolean> | null = null
+let connectAbortController: AbortController | null = null
 let pendingIceCandidates: RTCIceCandidate[] = []
 let seenRemoteCandidates = new Set<string>()
 let cachedMediaStream: MediaStream | null = null
@@ -422,6 +423,8 @@ async function connect(): Promise<boolean> {
 
     pendingIceCandidates = []
     seenRemoteCandidates.clear()
+    const abortController = new AbortController()
+    connectAbortController = abortController
 
     try {
       state.value = 'connecting'
@@ -429,6 +432,7 @@ async function connect(): Promise<boolean> {
       setConnectStage('fetching_ice_servers')
 
       const iceServers = await fetchIceServers()
+      if (abortController.signal.aborted) return false
       setConnectStage('creating_peer_connection', { iceServerCount: iceServers.length })
 
       peerConnection = createPeerConnection(iceServers)
@@ -441,11 +445,14 @@ async function connect(): Promise<boolean> {
       setConnectStage('creating_offer')
 
       const offer = await peerConnection.createOffer()
+      if (abortController.signal.aborted) return false
       await peerConnection.setLocalDescription(offer)
+      if (abortController.signal.aborted) return false
       setConnectStage('waiting_server_answer')
 
       // Do not pass client_id here: each connect creates a fresh session.
-      const response = await webrtcApi.offer(offer.sdp!)
+      const response = await webrtcApi.offer(offer.sdp!, abortController.signal)
+      if (abortController.signal.aborted) return false
       sessionId = response.session_id
       sessionIdRef.value = response.session_id
 
@@ -519,6 +526,10 @@ async function connect(): Promise<boolean> {
       })
       throw new Error('Connection timeout waiting for ICE negotiation')
     } catch (err) {
+      if (abortController.signal.aborted) {
+        isConnecting = false
+        return false
+      }
       state.value = 'failed'
       setConnectStage('failed', {
         sessionId,
@@ -532,6 +543,10 @@ async function connect(): Promise<boolean> {
       isConnecting = false
       await disconnect()
       return false
+    } finally {
+      if (connectAbortController === abortController) {
+        connectAbortController = null
+      }
     }
   })()
 
@@ -543,6 +558,8 @@ async function connect(): Promise<boolean> {
 }
 
 async function disconnect() {
+  connectAbortController?.abort()
+  connectAbortController = null
   stopStatsCollection()
 
   // Clear state FIRST to prevent ICE candidates from being sent

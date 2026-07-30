@@ -1,4 +1,15 @@
 export default {
+  videoInput: {
+    format: '输入格式',
+    resolution: '分辨率',
+    frameRate: '帧率',
+    noSignal: '无信号',
+    unavailable: '无法读取输入状态',
+    refresh: '刷新输入状态',
+    selectFormat: '选择格式...',
+    selectResolution: '选择分辨率...',
+    selectFps: '选择帧率...',
+  },
   common: {
     loading: '加载中...',
     save: '保存',
@@ -677,7 +688,7 @@ export default {
     computerUseAgent: 'Computer Use Agent',
     pasteText: '粘贴文本',
     videoSettings: '视频采集',
-    videoSettingsDesc: '配置视频采集设备的格式、分辨率与帧率',
+    videoSettingsDesc: '选择视频采集设备；输入跟随型设备会自动显示当前输入模式',
     videoDevice: '视频设备',
     selectDevice: '选择设备...',
     videoFormat: '视频格式',
@@ -1072,7 +1083,6 @@ export default {
       confirmRegenerateId: '确定要重新生成设备 ID 吗？现有客户端需要使用新 ID 重新连接。',
       confirmRegeneratePassword: '确定要重新生成设备密码吗？现有客户端需要使用新密码重新连接。',
       registered: '已注册',
-      connected: '已连接',
       disconnected: '未连接',
       connecting: '连接中',
       notConfigured: '未配置',

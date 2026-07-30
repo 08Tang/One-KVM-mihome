@@ -23,6 +23,7 @@ use v4l2r::{Format as V4l2rFormat, PixelFormat as V4l2rPixelFormat, QueueType};
 
 use crate::error::{AppError, Result};
 use crate::video::device::bridge::{self as csi_bridge, CsiBridgeKind, ProbeResult};
+use crate::video::device::VideoControlMode;
 use crate::video::format::{PixelFormat, Resolution};
 use crate::video::signal::SignalStatus;
 
@@ -65,6 +66,7 @@ pub struct CaptureStream {
     queue: QueueType,
     resolution: Resolution,
     format: PixelFormat,
+    source_fps: Option<f64>,
     stride: u32,
     timeout: Duration,
     mappings: Vec<Vec<PlaneMapping>>,
@@ -92,6 +94,7 @@ impl CaptureStream {
             buffer_count,
             timeout,
             BridgeContext::default(),
+            VideoControlMode::Configurable,
         )
     }
 
@@ -104,6 +107,7 @@ impl CaptureStream {
         buffer_count: u32,
         timeout: Duration,
         bridge: BridgeContext,
+        control_mode: VideoControlMode,
     ) -> Result<Self> {
         // Probe subdev before video open (RK628: no-signal must not reach capture STREAMON).
         let mut subdev_fd_opt: Option<File> = None;
@@ -154,9 +158,8 @@ impl CaptureStream {
         let caps: V4l2rCapability = ioctl::querycap(&fd)
             .map_err(|e| AppError::VideoError(format!("Failed to query capabilities: {}", e)))?;
         let caps_flags = caps.device_caps();
-        let driver_name = caps.driver.to_string();
-        let is_csi_bridge = is_csi_bridge_driver(&driver_name);
-        let is_native_hdmirx = is_native_hdmirx_driver(&driver_name);
+        let is_source_following = control_mode == VideoControlMode::SourceFollowing;
+        let is_native_hdmirx = bridge.kind == Some(CsiBridgeKind::RkHdmirx);
 
         // Prefer multi-planar capture when available, as it is required for some
         // devices/pixel formats (e.g. NV12 via VIDEO_CAPTURE_MPLANE).
@@ -181,7 +184,7 @@ impl CaptureStream {
                 fps: mode.fps,
                 signature: None,
             })
-        } else if is_csi_bridge {
+        } else if is_source_following {
             // The native RK3588 HDMI RX driver already latches detected
             // timings while locking the input.  S_DV_TIMINGS is unnecessary
             // there and rejects some otherwise valid sources whose measured
@@ -196,7 +199,7 @@ impl CaptureStream {
         // `v4l2-ctl --set-fmt-video=width=…,height=…`).
         let mut fmt: V4l2rFormat = match (
             ioctl::g_fmt::<V4l2rFormat>(&fd, queue),
-            is_csi_bridge,
+            is_source_following,
             dv_mode.as_ref(),
         ) {
             (Ok(f), _, _) if f.width > 0 && f.height > 0 => f,
@@ -323,6 +326,7 @@ impl CaptureStream {
             queue,
             resolution: actual_resolution,
             format: actual_format,
+            source_fps: dv_mode.as_ref().and_then(|mode| mode.fps),
             stride,
             timeout,
             mappings,
@@ -364,6 +368,10 @@ impl CaptureStream {
 
     pub fn format(&self) -> PixelFormat {
         self.format
+    }
+
+    pub fn source_fps(&self) -> Option<f64> {
+        self.source_fps
     }
 
     pub fn stride(&self) -> u32 {
@@ -696,19 +704,6 @@ impl Drop for CaptureStream {
     }
 }
 
-/// Driver-name check for CSI/HDMI bridge devices (rk_hdmirx, rkcif, tc358743,
-/// …) that expose DV timings.  Kept in sync with `video::device::is_csi_hdmi_bridge`
-/// but queries the raw V4L2 driver string so we don't need a full
-/// `VideoDeviceInfo` at `CaptureStream::open` time.
-fn is_csi_bridge_driver(driver: &str) -> bool {
-    let d = driver.to_ascii_lowercase();
-    is_native_hdmirx_driver(&d) || d == "rkcif" || d == "tc358743" || d.starts_with("rkcif")
-}
-
-fn is_native_hdmirx_driver(driver: &str) -> bool {
-    driver.eq_ignore_ascii_case("rk_hdmirx") || driver.eq_ignore_ascii_case("snps_hdmirx")
-}
-
 /// Drain any pending `V4L2_EVENT_*` events on `fd`.  Used after POLLPRI to
 /// clear the queue so the next poll doesn't immediately wake up on stale
 /// state.  Capped at 16 events per call.
@@ -765,34 +760,14 @@ impl NativeHdmirxState {
 struct DvTimingsSignature {
     width: u32,
     height: u32,
-    total_width: u32,
-    total_height: u32,
-    pixelclock: u64,
     interlaced: bool,
 }
 
 impl DvTimingsSignature {
     fn matches(self, other: Self) -> bool {
-        let self_total = u128::from(self.total_width) * u128::from(self.total_height);
-        let other_total = u128::from(other.total_width) * u128::from(other.total_height);
-        // RK3588 BSPs can describe the same active mode with different
-        // blanking/pixel-clock pairs (observed for 1080p60: 2200×1125 at
-        // 148.5 MHz and 2752×1125 at 185.448 MHz). Compare the resulting
-        // frame rates by cross multiplication instead of requiring identical
-        // totals. A 0.5% tolerance absorbs measurement jitter and 59.94/60,
-        // while still distinguishing normal 50/60 transitions.
-        let self_rate = u128::from(self.pixelclock) * other_total;
-        let other_rate = u128::from(other.pixelclock) * self_total;
-        let rate_delta = self_rate.abs_diff(other_rate);
-        let rate_tolerance = (self_rate.max(other_rate) / 200).max(1);
         self.width == other.width
             && self.height == other.height
             && self.interlaced == other.interlaced
-            && self.pixelclock != 0
-            && other.pixelclock != 0
-            && self_total != 0
-            && other_total != 0
-            && rate_delta <= rate_tolerance
     }
 }
 
@@ -804,20 +779,9 @@ fn dv_timings_signature(timings: &v4l2_dv_timings) -> Option<DvTimingsSignature>
     let bt = unsafe { timings.__bindgen_anon_1.bt };
     let width = bt.width;
     let height = bt.height;
-    let total_width = width
-        .checked_add(bt.hfrontporch)?
-        .checked_add(bt.hsync)?
-        .checked_add(bt.hbackporch)?;
-    let total_height = height
-        .checked_add(bt.vfrontporch)?
-        .checked_add(bt.vsync)?
-        .checked_add(bt.vbackporch)?;
     Some(DvTimingsSignature {
         width,
         height,
-        total_width,
-        total_height,
-        pixelclock: bt.pixelclock,
         interlaced: bt.interlaced != 0,
     })
 }
@@ -856,7 +820,7 @@ fn probe_dv_timings(fd: &File, apply: bool) -> Result<DvTimingsMode> {
                 | QueryDvTimingsError::IoctlError(Errno::ETIMEDOUT) => SignalStatus::NoSync,
                 QueryDvTimingsError::IoctlError(_) => SignalStatus::NoSignal,
             };
-            info!(
+            debug!(
                 "VIDIOC_QUERY_DV_TIMINGS failed: {} -> SignalStatus::{:?}",
                 err, status
             );
@@ -973,43 +937,28 @@ fn set_fps(fd: &File, queue: QueueType, fps: u32) -> std::result::Result<(), ioc
 
 #[cfg(test)]
 mod tests {
-    use super::{is_native_hdmirx_driver, DvTimingsSignature, NativeHdmirxState};
+    use super::{DvTimingsSignature, NativeHdmirxState};
     use crate::video::format::PixelFormat;
 
-    fn timing(pixelclock: u64) -> DvTimingsSignature {
+    fn timing() -> DvTimingsSignature {
         DvTimingsSignature {
             width: 1920,
             height: 1080,
-            total_width: 2200,
-            total_height: 1125,
-            pixelclock,
             interlaced: false,
         }
     }
 
     #[test]
-    fn recognizes_vendor_and_upstream_native_hdmirx_drivers() {
-        assert!(is_native_hdmirx_driver("rk_hdmirx"));
-        assert!(is_native_hdmirx_driver("SNPS_HDMIRX"));
-        assert!(!is_native_hdmirx_driver("rkcif"));
-    }
+    fn timing_match_uses_only_active_geometry_and_scan_mode() {
+        assert!(timing().matches(timing()));
 
-    #[test]
-    fn timing_match_tolerates_measurement_jitter_but_not_mode_changes() {
-        assert!(timing(148_500_000).matches(timing(148_000_000)));
-        assert!(!timing(148_500_000).matches(timing(120_000_000)));
+        let mut different_width = timing();
+        different_width.width = 1280;
+        assert!(!timing().matches(different_width));
 
-        let mut equivalent_blanking = timing(185_448_000);
-        equivalent_blanking.total_width = 2752;
-        assert!(timing(148_500_000).matches(equivalent_blanking));
-
-        let mut different_refresh = timing(148_500_000);
-        different_refresh.total_width = 2640;
-        assert!(!timing(148_500_000).matches(different_refresh));
-
-        let mut interlaced = timing(148_500_000);
+        let mut interlaced = timing();
         interlaced.interlaced = true;
-        assert!(!timing(148_500_000).matches(interlaced));
+        assert!(!timing().matches(interlaced));
     }
 
     #[test]
@@ -1019,14 +968,16 @@ mod tests {
             width: 1920,
             height: 1080,
             pixelformat: bgr24,
-            timings: Some(timing(148_500_000)),
+            timings: Some(timing()),
         };
 
         assert!(state.format_matches(1920, 1080, bgr24));
         assert!(!state.format_matches(1280, 720, bgr24));
         assert!(!state.format_matches(1920, 1080, PixelFormat::Nv12.to_v4l2r()));
-        assert_eq!(state.timings_match(Some(timing(148_000_000))), Some(true));
-        assert_eq!(state.timings_match(Some(timing(120_000_000))), Some(false));
+        assert_eq!(state.timings_match(Some(timing())), Some(true));
+        let mut interlaced = timing();
+        interlaced.interlaced = true;
+        assert_eq!(state.timings_match(Some(interlaced)), Some(false));
         assert_eq!(state.timings_match(None), None);
 
         let no_timing_state = NativeHdmirxState {

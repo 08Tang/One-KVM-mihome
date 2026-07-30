@@ -374,11 +374,12 @@ export const webrtcApi = {
   createSession: () =>
     request<{ session_id: string }>('/webrtc/session', { method: 'POST' }),
 
-  offer: (sdp: string) =>
+  offer: (sdp: string, signal?: AbortSignal) =>
     request<{ sdp: string; session_id: string; ice_candidates: IceCandidate[] }>('/webrtc/offer', {
       method: 'POST',
       body: JSON.stringify({ sdp }),
-    }),
+      signal,
+    }, { toastOnError: false }),
 
   addIceCandidate: (sessionId: string, candidate: IceCandidate) =>
     request<{ success: boolean }>('/webrtc/ice', {
@@ -742,6 +743,56 @@ interface SerialDeviceOption {
   name: string
 }
 
+export type VideoControlMode = 'configurable' | 'source_following'
+export type VideoInputState = 'locked' | 'no_signal' | 'unavailable'
+
+export interface VideoInputStatus {
+  state: VideoInputState
+  format: string | null
+  width: number | null
+  height: number | null
+  fps: number | null
+}
+
+export interface VideoResolution {
+  width: number
+  height: number
+  fps: number[]
+}
+
+export interface VideoFormat {
+  format: string
+  description: string
+  resolutions: VideoResolution[]
+}
+
+export interface VideoDevice {
+  path: string
+  name: string
+  driver: string
+  formats: VideoFormat[]
+  usb_bus: string | null
+  has_signal: boolean
+  control_mode: VideoControlMode
+  input_status: VideoInputStatus
+}
+
+export interface DeviceList {
+  video: VideoDevice[]
+  serial: Array<{ path: string; name: string }>
+  audio: Array<{
+    name: string
+    description: string
+    is_hdmi: boolean
+    usb_bus: string | null
+  }>
+  udc: Array<{ name: string }>
+  extensions: {
+    ttyd_available: boolean
+    rustdesk_available: boolean
+  }
+}
+
 function encodeDrivePath(path: string): string {
   if (path === '' || path === '/') {
     return '/'
@@ -774,42 +825,20 @@ function sortSerialDevices(serialDevices: SerialDeviceOption[]): SerialDeviceOpt
 
 export const configApi = {
   listDevices: async () => {
-    const result = await request<{
-      video: Array<{
-        path: string
-        name: string
-        driver: string
-        formats: Array<{
-          format: string
-          description: string
-          resolutions: Array<{
-            width: number
-            height: number
-            fps: number[]
-          }>
-        }>
-        usb_bus: string | null
-        has_signal: boolean
-      }>
-      serial: Array<{ path: string; name: string }>
-      audio: Array<{
-        name: string
-        description: string
-        is_hdmi: boolean
-        usb_bus: string | null
-      }>
-      udc: Array<{ name: string }>
-      extensions: {
-        ttyd_available: boolean
-        rustdesk_available: boolean
-      }
-    }>('/devices')
+    const result = await request<DeviceList>('/devices')
 
     return {
       ...result,
       serial: sortSerialDevices(result.serial),
     }
   },
+
+  getVideoInputStatus: (device: string) =>
+    request<VideoInputStatus>(
+      `/video/input-status?device=${encodeURIComponent(device)}`,
+      {},
+      { toastOnError: false },
+    ),
 }
 
 export {

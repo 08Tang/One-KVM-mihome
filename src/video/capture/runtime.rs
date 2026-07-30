@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use crate::error::AppError;
 use crate::video::capture::status::signal_status_from_capture_kind;
+use crate::video::device::VideoControlMode;
 use crate::video::format::{PixelFormat, Resolution};
 use crate::video::signal::SignalStatus;
 
@@ -23,6 +24,7 @@ pub fn open_capture_stream(
     buffer_count: u32,
     timeout: Duration,
     bridge_ctx: BridgeContext,
+    control_mode: VideoControlMode,
 ) -> Result<CaptureStream, AppError> {
     CaptureStream::open_with_bridge(
         device_path,
@@ -32,6 +34,7 @@ pub fn open_capture_stream(
         buffer_count.max(1),
         timeout,
         bridge_ctx,
+        control_mode,
     )
 }
 
@@ -43,6 +46,7 @@ pub fn open_capture_stream_for_retry(
     buffer_count: u32,
     timeout: Duration,
     bridge_ctx: BridgeContext,
+    control_mode: VideoControlMode,
     is_device_lost_message: impl FnOnce(&str) -> bool,
 ) -> CaptureOpenResult {
     match open_capture_stream(
@@ -53,6 +57,7 @@ pub fn open_capture_stream_for_retry(
         buffer_count,
         timeout,
         bridge_ctx,
+        control_mode,
     ) {
         Ok(stream) => CaptureOpenResult::Opened(stream),
         Err(AppError::CaptureNoSignal { kind }) => {

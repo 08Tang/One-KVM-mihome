@@ -57,7 +57,12 @@ export function useConsoleEvents(handlers: ConsoleEventHandlers) {
     handlers.onStreamRecovered?.(_data)
   }
 
-  function handleStreamStateChangedForward(data: { state: string; device?: string | null }) {
+  function handleStreamStateChangedForward(data: {
+    state: string
+    device?: string | null
+    reason?: string | null
+    next_retry_ms?: number | null
+  }) {
     handlers.onStreamStateChanged?.(data)
   }
 

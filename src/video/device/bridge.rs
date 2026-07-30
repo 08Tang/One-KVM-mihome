@@ -53,6 +53,7 @@ pub enum ProbeResult {
     NoSync,
     OutOfRange,
     NoSignal,
+    Unavailable,
 }
 
 impl ProbeResult {
@@ -63,6 +64,7 @@ impl ProbeResult {
             ProbeResult::NoSync => Some(SignalStatus::NoSync),
             ProbeResult::OutOfRange => Some(SignalStatus::OutOfRange),
             ProbeResult::NoSignal => Some(SignalStatus::NoSignal),
+            ProbeResult::Unavailable => None,
         }
     }
 
@@ -138,13 +140,23 @@ pub fn open_subdev(path: &Path) -> io::Result<File> {
 pub fn probe_signal(subdev_fd: &impl AsRawFd, kind: CsiBridgeKind) -> ProbeResult {
     match ioctl::query_dv_timings::<v4l2_dv_timings>(subdev_fd) {
         Ok(timings) => classify_timings(timings, kind),
-        Err(QueryDvTimingsError::NoLink) => ProbeResult::NoCable,
-        Err(QueryDvTimingsError::UnstableSignal) => ProbeResult::NoSync,
-        Err(QueryDvTimingsError::IoctlError(Errno::ERANGE)) => ProbeResult::OutOfRange,
-        Err(QueryDvTimingsError::IoctlError(Errno::EIO | Errno::EREMOTEIO | Errno::ETIMEDOUT)) => {
+        Err(error) => classify_query_error(&error, kind),
+    }
+}
+
+fn classify_query_error(error: &QueryDvTimingsError, kind: CsiBridgeKind) -> ProbeResult {
+    match error {
+        QueryDvTimingsError::NoLink => ProbeResult::NoCable,
+        QueryDvTimingsError::UnstableSignal => ProbeResult::NoSync,
+        QueryDvTimingsError::IoctlError(Errno::ERANGE) => ProbeResult::OutOfRange,
+        QueryDvTimingsError::IoctlError(Errno::EIO | Errno::EREMOTEIO | Errno::ETIMEDOUT) => {
             ProbeResult::NoSync
         }
-        Err(QueryDvTimingsError::Unsupported) | Err(QueryDvTimingsError::IoctlError(_)) => {
+        QueryDvTimingsError::Unsupported
+        | QueryDvTimingsError::IoctlError(
+            Errno::ENOTTY | Errno::EINVAL | Errno::ENOSYS | Errno::EOPNOTSUPP,
+        ) if kind == CsiBridgeKind::Unknown => ProbeResult::Unavailable,
+        QueryDvTimingsError::Unsupported | QueryDvTimingsError::IoctlError(_) => {
             ProbeResult::NoSignal
         }
     }
@@ -179,7 +191,7 @@ pub fn probe_signal_thread_timeout(
             Some(r)
         }
         Err(mpsc::RecvTimeoutError::Timeout) => {
-            warn!(
+            debug!(
                 "QUERY_DV_TIMINGS exceeded {:?} (RK628 HDMI mode change?) — abandoning probe thread",
                 limit
             );
@@ -351,5 +363,28 @@ mod tests {
             Some(CsiBridgeKind::Tc358743)
         );
         assert_eq!(CsiBridgeKind::from_subdev_name("mystery"), None);
+    }
+
+    #[test]
+    fn query_errno_mapping_distinguishes_signal_loss_from_unsupported_nodes() {
+        assert!(matches!(
+            classify_query_error(&QueryDvTimingsError::NoLink, CsiBridgeKind::RkHdmirx),
+            ProbeResult::NoCable
+        ));
+        assert!(matches!(
+            classify_query_error(
+                &QueryDvTimingsError::UnstableSignal,
+                CsiBridgeKind::RkHdmirx
+            ),
+            ProbeResult::NoSync
+        ));
+        assert!(matches!(
+            classify_query_error(&QueryDvTimingsError::Unsupported, CsiBridgeKind::RkHdmirx),
+            ProbeResult::NoSignal
+        ));
+        assert!(matches!(
+            classify_query_error(&QueryDvTimingsError::Unsupported, CsiBridgeKind::Unknown),
+            ProbeResult::Unavailable
+        ));
     }
 }

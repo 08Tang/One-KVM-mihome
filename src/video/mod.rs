@@ -10,6 +10,7 @@ pub mod format;
 pub mod frame;
 #[cfg(feature = "desktop")]
 pub mod pipeline;
+pub mod recovery;
 pub mod signal;
 #[cfg(feature = "desktop")]
 pub mod stream_manager;

@@ -4,7 +4,9 @@ use std::time::Duration;
 
 use crate::error::{AppError, Result};
 use crate::video::device::bridge::{CsiBridgeKind, ProbeResult};
-use crate::video::device::{directshow_display_name_from_path, normalize_windows_device_path};
+use crate::video::device::{
+    directshow_display_name_from_path, normalize_windows_device_path, VideoControlMode,
+};
 use crate::video::format::{PixelFormat, Resolution};
 
 pub const SOURCE_CHANGED_MARKER: &str = "dshow_source_changed";
@@ -95,8 +97,9 @@ impl CaptureStream {
         buffer_count: u32,
         timeout: Duration,
         bridge: BridgeContext,
+        control_mode: VideoControlMode,
     ) -> Result<Self> {
-        let _ = bridge;
+        let _ = (bridge, control_mode);
         Self::open(device_path, resolution, format, fps, buffer_count, timeout)
     }
 
@@ -106,6 +109,10 @@ impl CaptureStream {
 
     pub fn format(&self) -> PixelFormat {
         self.format
+    }
+
+    pub fn source_fps(&self) -> Option<f64> {
+        None
     }
 
     pub fn stride(&self) -> u32 {

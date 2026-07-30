@@ -93,6 +93,6 @@ fn is_public_endpoint(path: &str) -> bool {
 fn is_setup_public_endpoint(path: &str) -> bool {
     matches!(
         path,
-        "/setup" | "/setup/init" | "/devices" | "/stream/codecs"
+        "/setup" | "/setup/init" | "/devices" | "/video/input-status" | "/stream/codecs"
     )
 }

@@ -17,7 +17,9 @@ use v4l2r::nix::errno::Errno;
 use v4l2r::{Format as V4l2rFormat, QueueType};
 
 use super::bridge as csi_bridge;
-use super::{is_rk_hdmirx_driver, is_rkcif_driver};
+use super::{
+    control_mode, is_rk_hdmirx_driver, is_rkcif_driver, VideoControlMode, VideoInputStatus,
+};
 use crate::error::{AppError, Result};
 use crate::video::format::{PixelFormat, Resolution};
 
@@ -48,6 +50,8 @@ pub struct VideoDeviceInfo {
     /// Whether an HDMI signal is currently detected (CSI/HDMI bridge devices only;
     /// always `true` for USB capture cards).
     pub has_signal: bool,
+    pub control_mode: VideoControlMode,
+    pub input_status: VideoInputStatus,
     /// Path of the bridge subdev (`/dev/v4l-subdevN`) paired with this
     /// capture node, if any.  On Rockchip boards that wire an RK628 /
     /// TC358746 / RK-HDMIRX through `rkcif`, `QUERY_DV_TIMINGS`,
@@ -129,6 +133,16 @@ pub struct VideoDevice {
     fd: File,
 }
 
+struct LiveInputProbe {
+    control_mode: VideoControlMode,
+    input_status: VideoInputStatus,
+    has_signal: bool,
+    hdmi_mode: Option<(u32, u32, Option<f64>)>,
+    hdmi_fps: Option<f64>,
+    subdev_path: Option<PathBuf>,
+    bridge_kind: Option<String>,
+}
+
 impl VideoDevice {
     /// Open a video device by path
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -173,6 +187,106 @@ impl VideoDevice {
         })
     }
 
+    pub fn input_status(&self) -> Result<VideoInputStatus> {
+        let caps: V4l2rCapability = ioctl::querycap(&self.fd)
+            .map_err(|e| AppError::VideoError(format!("Failed to query capabilities: {}", e)))?;
+        Ok(self.probe_live_input(&caps).input_status)
+    }
+
+    fn probe_live_input(&self, caps: &V4l2rCapability) -> LiveInputProbe {
+        let control_mode = control_mode(&caps.driver, &caps.card);
+        if control_mode == VideoControlMode::Configurable {
+            let input_status = self
+                .get_format()
+                .ok()
+                .and_then(|fmt| {
+                    PixelFormat::from_v4l2r(fmt.pixelformat)
+                        .map(|format| (format, fmt.width, fmt.height))
+                })
+                .map(|(format, width, height)| {
+                    VideoInputStatus::locked(
+                        format,
+                        width,
+                        height,
+                        self.current_parm_fps().unwrap_or(0.0),
+                    )
+                })
+                .unwrap_or_else(VideoInputStatus::unavailable);
+            return LiveInputProbe {
+                control_mode,
+                input_status,
+                has_signal: true,
+                hdmi_mode: None,
+                hdmi_fps: None,
+                subdev_path: None,
+                bridge_kind: None,
+            };
+        }
+
+        let (subdev_path, bridge_kind) = match csi_bridge::discover_subdev_for_video(&self.path) {
+            Some((path, kind)) => (Some(path), Some(format!("{:?}", kind).to_lowercase())),
+            None if is_rk_hdmirx_driver(&caps.driver, &caps.card) => {
+                (None, Some("rkhdmirx".to_string()))
+            }
+            None => (None, None),
+        };
+
+        let probe = if let Some(path) = subdev_path.as_ref() {
+            match csi_bridge::open_subdev(path) {
+                Ok(fd) => {
+                    let kind = parse_bridge_kind(bridge_kind.as_deref())
+                        .unwrap_or(csi_bridge::CsiBridgeKind::Unknown);
+                    csi_bridge::probe_signal_thread_timeout(
+                        &fd,
+                        kind,
+                        csi_bridge::RK628_SUBDEV_PROBE_TIMEOUT,
+                    )
+                }
+                Err(error) => {
+                    warn!("Failed to open subdev {:?}: {}", path, error);
+                    None
+                }
+            }
+        } else {
+            let kind = if is_rk_hdmirx_driver(&caps.driver, &caps.card) {
+                csi_bridge::CsiBridgeKind::RkHdmirx
+            } else {
+                csi_bridge::CsiBridgeKind::Unknown
+            };
+            Some(csi_bridge::probe_signal(&self.fd, kind))
+        };
+
+        let (input_status, hdmi_mode, hdmi_fps, has_signal) = match probe {
+            Some(csi_bridge::ProbeResult::Locked(mode)) if mode.width > 64 && mode.height > 64 => {
+                let fps = mode.fps.or_else(|| self.current_parm_fps());
+                let hdmi_mode = Some((mode.width, mode.height, fps));
+                let status = VideoInputStatus::locked_with_optional_fps(
+                    self.current_active_format(),
+                    mode.width,
+                    mode.height,
+                    fps,
+                );
+                (status, hdmi_mode, fps, true)
+            }
+            Some(csi_bridge::ProbeResult::Unavailable) => {
+                (VideoInputStatus::unavailable(), None, None, false)
+            }
+            Some(_) => (VideoInputStatus::no_signal(), None, None, false),
+            None if subdev_path.is_some() => (VideoInputStatus::unavailable(), None, None, false),
+            None => (VideoInputStatus::unavailable(), None, None, false),
+        };
+
+        LiveInputProbe {
+            control_mode,
+            input_status,
+            has_signal,
+            hdmi_mode,
+            hdmi_fps,
+            subdev_path,
+            bridge_kind,
+        }
+    }
+
     /// Get detailed device information
     pub fn info(&self) -> Result<VideoDeviceInfo> {
         let caps: V4l2rCapability = ioctl::querycap(&self.fd)
@@ -186,86 +300,10 @@ impl VideoDevice {
             read_write: flags.contains(Capabilities::READWRITE),
         };
 
-        // For CSI/HDMI bridges, try to locate the paired subdev *before*
-        // the signal check: RK628 + rkcif places QUERY_DV_TIMINGS on the
-        // subdev (the video node returns ENOTTY).  Tc358743 and rk_hdmirx
-        // typically expose DV ioctls on the video node itself, but having
-        // the subdev handle for EDID/event subscription doesn't hurt.
-        let (subdev_path, bridge_kind) =
-            if is_rkcif_driver(&caps.driver) || is_rk_hdmirx_driver(&caps.driver, &caps.card) {
-                match csi_bridge::discover_subdev_for_video(&self.path) {
-                    Some((path, kind)) => (Some(path), Some(format!("{:?}", kind).to_lowercase())),
-                    None => (None, None),
-                }
-            } else {
-                (None, None)
-            };
-
-        // Probe the HDMI source for both signal presence *and* the live
-        // frame-rate.  rkcif's `VIDIOC_ENUM_FRAMEINTERVALS` returns a
-        // meaningless `1.0..30.0` StepWise range, so the only trustworthy
-        // fps for rkcif + RK628 / rk_hdmirx boards comes from the bridge
-        // subdev's DV timings (pixelclock / total_width / total_height).
-        //
-        // Preference order:
-        //   1. Bridge subdev — on rkcif boards this is the *only* node
-        //      where QUERY_DV_TIMINGS works, and it lets the RK628
-        //      fingerprint filter kick in before we return has_signal=true.
-        //   2. Video node fallback — for rk_hdmirx / tc358743 where DV
-        //      timings are exposed on the capture node directly.
-        //   3. USB UVC — always true (no signal concept), no hdmi_fps.
-        // Subdev-reported HDMI source mode (width, height, fps).  On rkcif +
-        // RK628 boards this is the *only* place DV timings work; the video
-        // node itself returns ENOTTY for QUERY/G_DV_TIMINGS, so without
-        // threading this through to `enumerate_bridge_formats` the format
-        // list ends up with zero resolutions and `select_resolution` falls
-        // back to the user's preferred value (e.g. 4K) even when the real
-        // source is 1080p.
-        let mut subdev_hdmi_mode: Option<(u32, u32, Option<f64>)> = None;
-
-        let (has_signal, hdmi_fps) = if let Some(subdev_path) = subdev_path.as_ref() {
-            match csi_bridge::open_subdev(subdev_path) {
-                Ok(subdev_fd) => {
-                    let kind = parse_bridge_kind(bridge_kind.as_deref())
-                        .unwrap_or(csi_bridge::CsiBridgeKind::Unknown);
-                    let probe = csi_bridge::probe_signal(&subdev_fd, kind);
-                    debug!(
-                        "has_signal via subdev {:?} ({:?}): {:?}",
-                        subdev_path, kind, probe
-                    );
-                    let fps = match &probe {
-                        csi_bridge::ProbeResult::Locked(mode) => {
-                            subdev_hdmi_mode = Some((mode.width, mode.height, mode.fps));
-                            mode.fps
-                        }
-                        _ => None,
-                    };
-                    (probe.is_locked(), fps)
-                }
-                Err(e) => {
-                    warn!("Failed to open subdev {:?}: {}", subdev_path, e);
-                    (false, None)
-                }
-            }
-        } else if is_rk_hdmirx_driver(&caps.driver, &caps.card) || is_rkcif_driver(&caps.driver) {
-            let dv = self.current_dv_timings_mode();
-            debug!(
-                "has_signal via video node {:?} (driver={}): dv_timings={:?}",
-                self.path, caps.driver, dv
-            );
-            let has_signal = dv
-                .as_ref()
-                .map(|(w, h, _)| *w > 64 && *h > 64)
-                .unwrap_or(false);
-            let fps = if has_signal {
-                dv.and_then(|(_, _, f)| f)
-            } else {
-                None
-            };
-            (has_signal, fps)
-        } else {
-            (true, None)
-        };
+        let live = self.probe_live_input(&caps);
+        let subdev_hdmi_mode = live.hdmi_mode;
+        let hdmi_fps = live.hdmi_fps;
+        let has_signal = live.has_signal;
 
         let native_hdmirx = is_rk_hdmirx_driver(&caps.driver, &caps.card);
         let mut formats = if native_hdmirx || is_rkcif_driver(&caps.driver) {
@@ -299,7 +337,7 @@ impl VideoDevice {
 
         debug!(
             "Device {:?}: {} formats, priority={}, has_signal={}, hdmi_fps={:?}, is_capture_card={}, subdev={:?}",
-            self.path, formats.len(), priority, has_signal, hdmi_fps, is_capture_card, subdev_path
+            self.path, formats.len(), priority, has_signal, hdmi_fps, is_capture_card, live.subdev_path
         );
 
         Ok(VideoDeviceInfo {
@@ -313,8 +351,10 @@ impl VideoDevice {
             is_capture_card,
             priority,
             has_signal,
-            subdev_path,
-            bridge_kind,
+            control_mode: live.control_mode,
+            input_status: live.input_status,
+            subdev_path: live.subdev_path,
+            bridge_kind: live.bridge_kind,
         })
     }
 
@@ -810,9 +850,7 @@ impl VideoDevice {
     }
 
     fn current_dv_timings_mode(&self) -> Option<(u32, u32, Option<f64>)> {
-        let timings = ioctl::query_dv_timings::<v4l2_dv_timings>(&self.fd)
-            .or_else(|_| ioctl::g_dv_timings::<v4l2_dv_timings>(&self.fd))
-            .ok()?;
+        let timings = ioctl::query_dv_timings::<v4l2_dv_timings>(&self.fd).ok()?;
 
         if timings.type_ != V4L2_DV_BT_656_1120 {
             return None;
@@ -1372,6 +1410,8 @@ mod tests {
             is_capture_card,
             priority,
             has_signal: true,
+            control_mode: control_mode(driver, card),
+            input_status: VideoInputStatus::unavailable(),
             subdev_path: None,
             bridge_kind: None,
         }

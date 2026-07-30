@@ -1,4 +1,15 @@
 export default {
+  videoInput: {
+    format: 'Input Format',
+    resolution: 'Resolution',
+    frameRate: 'Frame Rate',
+    noSignal: 'No signal',
+    unavailable: 'Unable to read input status',
+    refresh: 'Refresh input status',
+    selectFormat: 'Select format...',
+    selectResolution: 'Select resolution...',
+    selectFps: 'Select FPS...',
+  },
   common: {
     loading: 'Loading...',
     save: 'Save',
@@ -678,7 +689,7 @@ export default {
     computerUseAgent: 'Computer Use Agent',
     pasteText: 'Paste Text',
     videoSettings: 'Video Capture',
-    videoSettingsDesc: 'Configure capture device format, resolution and frame rate',
+    videoSettingsDesc: 'Select a capture device. Source-following inputs report their active mode automatically.',
     videoDevice: 'Video Device',
     selectDevice: 'Select device...',
     videoFormat: 'Video Format',
@@ -1073,7 +1084,6 @@ export default {
       confirmRegenerateId: 'Are you sure you want to regenerate the device ID? Existing clients will need to reconnect with the new ID.',
       confirmRegeneratePassword: 'Are you sure you want to regenerate the password? Existing clients will need to reconnect with the new password.',
       registered: 'Registered',
-      connected: 'Connected',
       disconnected: 'Disconnected',
       connecting: 'Connecting',
       notConfigured: 'Not Configured',

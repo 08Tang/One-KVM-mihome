@@ -44,7 +44,7 @@ pub struct SetupRequest {
 
 pub async fn setup_init(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<SetupRequest>,
+    Json(mut req): Json<SetupRequest>,
 ) -> Result<Json<LoginResponse>> {
     // Check if already initialized
     if state.config.is_initialized() {
@@ -63,6 +63,37 @@ pub async fn setup_init(
         return Err(AppError::BadRequest(
             "Password must be at least 4 characters".to_string(),
         ));
+    }
+
+    if let Some(path) = req.video_device.as_deref() {
+        let source_following = state
+            .stream_manager
+            .list_devices()
+            .await
+            .ok()
+            .and_then(|devices| {
+                devices
+                    .into_iter()
+                    .find(|device| device.path.to_string_lossy() == path)
+            })
+            .is_some_and(|device| {
+                device.control_mode == crate::video::device::VideoControlMode::SourceFollowing
+            });
+        if source_following {
+            if req.video_format.is_some()
+                || req.video_width.is_some()
+                || req.video_height.is_some()
+                || req.video_fps.is_some()
+            {
+                tracing::debug!(
+                    "Ignoring setup-supplied format, resolution, and FPS for source-following video input"
+                );
+            }
+            req.video_format = None;
+            req.video_width = None;
+            req.video_height = None;
+            req.video_fps = None;
+        }
     }
 
     let old_config = state.config.get();

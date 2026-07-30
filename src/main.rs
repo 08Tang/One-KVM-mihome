@@ -426,25 +426,9 @@ async fn main() -> anyhow::Result<()> {
         .update_video_config(actual_resolution, actual_format, actual_fps)
         .await;
     if let Some(device_path) = device_path {
-        let (subdev_path, bridge_kind, v4l2_driver) = streamer
-            .current_device()
-            .await
-            .map(|d| {
-                (
-                    d.subdev_path.clone(),
-                    d.bridge_kind.clone(),
-                    Some(d.driver.clone()),
-                )
-            })
-            .unwrap_or((None, None, None));
+        let device_info = streamer.current_device().await;
         webrtc_streamer
-            .set_capture_device(
-                device_path,
-                jpeg_quality,
-                subdev_path,
-                bridge_kind,
-                v4l2_driver,
-            )
+            .set_capture_device(device_path, jpeg_quality, device_info)
             .await;
         tracing::debug!("WebRTC streamer configured for direct capture");
     } else {

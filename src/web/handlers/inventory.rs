@@ -23,6 +23,13 @@ pub struct VideoDevice {
     pub formats: Vec<VideoFormat>,
     pub usb_bus: Option<String>,
     pub has_signal: bool,
+    pub control_mode: crate::video::device::VideoControlMode,
+    pub input_status: crate::video::device::VideoInputStatus,
+}
+
+#[derive(Deserialize)]
+pub struct VideoInputStatusQuery {
+    pub device: String,
 }
 
 #[derive(Serialize)]
@@ -121,6 +128,8 @@ pub async fn list_devices(State(state): State<Arc<AppState>>) -> Json<DeviceList
                         .collect(),
                     usb_bus,
                     has_signal: d.has_signal,
+                    control_mode: d.control_mode,
+                    input_status: d.input_status,
                 }
             })
             .collect(),
@@ -179,4 +188,72 @@ pub async fn list_devices(State(state): State<Arc<AppState>>) -> Json<DeviceList
             rustdesk_available: platform.rustdesk.available,
         },
     })
+}
+
+#[cfg(unix)]
+fn validated_video_node(path: &str, sysfs_root: &std::path::Path) -> Option<std::path::PathBuf> {
+    let path = std::path::Path::new(path);
+    let name = path.file_name()?.to_str()?;
+    if path.parent() != Some(std::path::Path::new("/dev"))
+        || !name.starts_with("video")
+        || name.len() == "video".len()
+        || !name["video".len()..].chars().all(|c| c.is_ascii_digit())
+        || !sysfs_root.join(name).exists()
+    {
+        return None;
+    }
+    Some(path.to_path_buf())
+}
+
+pub async fn video_input_status(
+    Query(query): Query<VideoInputStatusQuery>,
+) -> Result<Json<crate::video::device::VideoInputStatus>> {
+    #[cfg(unix)]
+    let path = validated_video_node(
+        &query.device,
+        std::path::Path::new("/sys/class/video4linux"),
+    )
+    .ok_or_else(|| AppError::BadRequest("Invalid video device".to_string()))?;
+
+    #[cfg(windows)]
+    let path = crate::video::device::enumerate_devices()?
+        .into_iter()
+        .find(|device| device.path.to_string_lossy() == query.device)
+        .map(|device| device.path)
+        .ok_or_else(|| AppError::BadRequest("Invalid video device".to_string()))?;
+
+    let probe_path = path.clone();
+    let status = tokio::task::spawn_blocking(move || {
+        crate::video::device::VideoDevice::open_readonly(&probe_path)
+            .and_then(|device| device.input_status())
+    })
+    .await
+    .ok()
+    .and_then(|result| result.ok())
+    .unwrap_or_else(|| {
+        debug!(device = %path.display(), "Unable to read video input status");
+        crate::video::device::VideoInputStatus::unavailable()
+    });
+
+    Ok(Json(status))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::validated_video_node;
+
+    #[test]
+    fn only_accepts_dev_video_nodes_present_in_sysfs() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("video7")).unwrap();
+
+        assert_eq!(
+            validated_video_node("/dev/video7", root.path()).unwrap(),
+            std::path::PathBuf::from("/dev/video7")
+        );
+        assert!(validated_video_node("/dev/video8", root.path()).is_none());
+        assert!(validated_video_node("/tmp/video7", root.path()).is_none());
+        assert!(validated_video_node("/dev/video7/../mem", root.path()).is_none());
+        assert!(validated_video_node("/dev/video", root.path()).is_none());
+    }
 }

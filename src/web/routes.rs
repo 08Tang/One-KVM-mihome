@@ -62,6 +62,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
         .route("/auth/totp/disable", post(handlers::disable_totp))
         .route("/devices", get(handlers::list_devices))
+        .route("/video/input-status", get(handlers::video_input_status))
         // WebSocket endpoint for real-time events
         .route("/ws", any(ws_handler))
         // Stream control endpoints

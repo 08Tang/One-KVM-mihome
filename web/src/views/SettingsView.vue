@@ -38,6 +38,7 @@ import {
   type UpdateStatusResponse,
   type UpdateChannel,
   type VideoEncoderSelfCheckResponse,
+  type DeviceList,
 } from '@/api'
 import type {
   ExtensionsStatus,
@@ -54,16 +55,18 @@ import type {
   WatchdogConfigResponse,
 } from '@/types/generated'
 import { FrpProxyType, FrpcConfigMode } from '@/types/generated'
-import { formatFpsLabel, toConfigFps } from '@/lib/fps'
+import { toConfigFps } from '@/lib/fps'
 import { useClipboard } from '@/composables/useClipboard'
 import { useFeatureVisibility } from '@/composables/useFeatureVisibility'
 import { useTheme } from '@/composables/useTheme'
+import { useVideoDeviceConfiguration } from '@/composables/useVideoDeviceConfiguration'
 import { getVideoFormatState } from '@/lib/video-format-support'
 import { formatVideoDeviceLabel } from '@/lib/video-device-label'
 import AppLayout from '@/components/AppLayout.vue'
 import LanguageToggleButton from '@/components/LanguageToggleButton.vue'
 import TerminalDialog from '@/components/TerminalDialog.vue'
 import TotpSettingsCard from '@/components/TotpSettingsCard.vue'
+import VideoInputFields from '@/components/VideoInputFields.vue'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -627,27 +630,7 @@ function openPreviewUrl() {
   window.open(previewAccessUrl.value, '_blank', 'noopener,noreferrer')
 }
 
-interface DeviceConfig {
-  video: Array<{
-    path: string
-    name: string
-    driver: string
-    formats: Array<{
-      format: string
-      description: string
-      resolutions: Array<{
-        width: number
-        height: number
-        fps: number[]
-      }>
-    }>
-  }>
-  serial: Array<{ path: string; name: string }>
-  audio: Array<{ name: string; description: string }>
-  udc: Array<{ name: string }>
-}
-
-const devices = ref<DeviceConfig>({
+const devices = ref<Pick<DeviceList, 'video' | 'serial' | 'audio' | 'udc'>>({
   video: [],
   serial: [],
   audio: [],
@@ -1235,14 +1218,52 @@ const selectedBackendFormats = computed(() => {
   return backend?.supported_formats || []
 })
 
-const selectedDevice = computed(() => {
-  return devices.value.video.find(d => d.path === config.value.video_device)
+const videoDeviceSelection = computed({
+  get: () => config.value.video_device,
+  set: value => { config.value.video_device = value },
+})
+const videoFormatSelection = computed({
+  get: () => config.value.video_format,
+  set: value => { config.value.video_format = value },
+})
+const videoResolutionSelection = computed({
+  get: () => `${config.value.video_width}x${config.value.video_height}`,
+  set: value => {
+    const [width, height] = value.split('x').map(Number)
+    if (width && height) {
+      config.value.video_width = width
+      config.value.video_height = height
+    }
+  },
+})
+const videoFpsSelection = computed<number | null>({
+  get: () => config.value.video_fps,
+  set: value => { if (value !== null) config.value.video_fps = value },
 })
 
-const availableFormats = computed(() => {
-  if (!selectedDevice.value) return []
-  return selectedDevice.value.formats
+const videoConfiguration = useVideoDeviceConfiguration({
+  devices: computed(() => devices.value.video),
+  selection: {
+    device: videoDeviceSelection,
+    format: videoFormatSelection,
+    resolution: videoResolutionSelection,
+    fps: videoFpsSelection,
+  },
+  active: computed(() => activeSection.value === 'video'),
+  listenForStreamEvents: true,
+  preferredFormat: device => device.formats.find(format =>
+    getVideoFormatState(format.format, 'config', config.value.encoder_backend) !== 'unsupported',
+  )?.format,
 })
+const {
+  selectedDevice,
+  isSourceFollowing,
+  availableFormats,
+  availableResolutions,
+  availableFps,
+  refreshInputStatus,
+  refreshingInputStatus,
+} = videoConfiguration
 
 const availableFormatOptions = computed(() => {
   return availableFormats.value.map(format => {
@@ -1257,36 +1278,6 @@ const availableFormatOptions = computed(() => {
 
 const selectableFormats = computed(() => {
   return availableFormatOptions.value.filter(format => !format.disabled)
-})
-
-const selectedFormat = computed(() => {
-  if (!selectedDevice.value || !config.value.video_format) return null
-  return selectedDevice.value.formats.find(f => f.format === config.value.video_format)
-})
-
-const availableResolutions = computed(() => {
-  if (!selectedFormat.value) return []
-  const resMap = new Map<string, { width: number; height: number; fps: number[] }>()
-
-  selectedFormat.value.resolutions.forEach(res => {
-    const key = `${res.width}x${res.height}`
-    if (!resMap.has(key)) {
-      resMap.set(key, { ...res })
-    } else {
-      const existing = resMap.get(key)!
-      const allFps = [...new Set([...existing.fps, ...res.fps])].sort((a, b) => b - a)
-      existing.fps = allFps
-    }
-  })
-  
-  return Array.from(resMap.values()).sort((a, b) => (b.width * b.height) - (a.width * a.height))
-})
-
-const availableFps = computed(() => {
-  const currentRes = availableResolutions.value.find(
-    r => r.width === config.value.video_width && r.height === config.value.video_height
-  )
-  return currentRes ? currentRes.fps : []
 })
 
 watch(
@@ -1304,34 +1295,6 @@ watch(
   },
   { deep: true },
 )
-
-watch(() => config.value.video_format, () => {
-  if (availableResolutions.value.length > 0) {
-    const isValid = availableResolutions.value.some(
-      r => r.width === config.value.video_width && r.height === config.value.video_height
-    )
-    if (!isValid) {
-      const best = availableResolutions.value[0]
-      if (best) {
-        config.value.video_width = best.width
-        config.value.video_height = best.height
-        if (best.fps?.[0]) config.value.video_fps = best.fps[0]
-      }
-    }
-  }
-})
-
-watch(() => [config.value.video_width, config.value.video_height], () => {
-  const fpsList = availableFps.value
-  if (fpsList.length > 0) {
-    if (!fpsList.includes(config.value.video_fps)) {
-      const firstFps = fpsList[0]
-      if (typeof firstFps === 'number') {
-        config.value.video_fps = firstFps
-      }
-    }
-  }
-})
 
 watch(() => authStore.user, (value) => {
   if (value) {
@@ -1439,13 +1402,15 @@ async function saveConfig() {
         turn_username: config.value.turn_username.trim(),
         turn_password: config.value.turn_password.trim(),
       })
-      await configStore.updateVideo({
-        device: config.value.video_device || undefined,
-        format: config.value.video_format || undefined,
-        width: config.value.video_width,
-        height: config.value.video_height,
-        fps: toConfigFps(config.value.video_fps),
-      })
+      await configStore.updateVideo(isSourceFollowing.value
+        ? { device: config.value.video_device || undefined }
+        : {
+            device: config.value.video_device || undefined,
+            format: config.value.video_format || undefined,
+            width: config.value.video_width,
+            height: config.value.video_height,
+            fps: toConfigFps(config.value.video_fps),
+          })
     }
 
     if (activeSection.value === 'hid') {
@@ -2457,7 +2422,6 @@ function getRustdeskRendezvousStatusText(status: string | null | undefined): str
   if (!status) return '-'
   switch (status) {
     case 'registered': return t('extensions.rustdesk.registered')
-    case 'connected': return t('extensions.rustdesk.connected')
     case 'connecting': return t('extensions.rustdesk.connecting')
     case 'disconnected': return t('extensions.rustdesk.disconnected')
     default:
@@ -2469,8 +2433,7 @@ function getRustdeskRendezvousStatusText(status: string | null | undefined): str
 function getRustdeskStatusClass(status: string | null | undefined): string {
   switch (status) {
     case 'running':
-    case 'registered':
-    case 'connected': return 'bg-status-active'
+    case 'registered': return 'bg-status-active'
     case 'starting':
     case 'connecting': return 'bg-warning'
     case 'stopped':
@@ -2957,48 +2920,21 @@ watch(isWindows, () => {
                     </SelectContent>
                   </Select>
                 </div>
-                <div class="space-y-2">
-                  <Label for="video-format">{{ t('settings.videoFormat') }}</Label>
-                  <Select
-                    :model-value="config.video_format"
-                    :disabled="!config.video_device"
-                    @update:model-value="value => config.video_format = value === EMPTY_SELECT_VALUE ? '' : String(value)"
-                  >
-                    <SelectTrigger id="video-format" class="w-full"><SelectValue :placeholder="t('settings.selectFormat')" /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem :value="EMPTY_SELECT_VALUE">{{ t('settings.selectFormat') }}</SelectItem>
-                      <SelectItem
-                        v-for="fmt in availableFormatOptions"
-                        :key="fmt.format"
-                        :value="fmt.format"
-                        :disabled="fmt.disabled"
-                      >
-                        {{ fmt.format }} - {{ fmt.description }}{{ fmt.disabled ? t('common.notSupportedYet') : '' }}
-                      </SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div class="grid gap-4 sm:grid-cols-2">
-                  <div class="space-y-2">
-                    <Label for="video-resolution">{{ t('settings.resolution') }}</Label>
-                    <Select :model-value="`${config.video_width}x${config.video_height}`" :disabled="!config.video_format" @update:model-value="value => { const parts = String(value).split('x').map(Number); if (parts[0] && parts[1]) { config.video_width = parts[0]; config.video_height = parts[1]; } }">
-                      <SelectTrigger id="video-resolution" class="w-full"><SelectValue /></SelectTrigger>
-                      <SelectContent>
-                        <SelectItem v-for="res in availableResolutions" :key="`${res.width}x${res.height}`" :value="`${res.width}x${res.height}`">{{ res.width }}x{{ res.height }}</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div class="space-y-2">
-                    <Label for="video-fps">{{ t('settings.frameRate') }}</Label>
-                    <Select :model-value="config.video_fps" :disabled="!config.video_format" @update:model-value="value => config.video_fps = Number(value)">
-                      <SelectTrigger id="video-fps" class="w-full"><SelectValue /></SelectTrigger>
-                      <SelectContent>
-                        <SelectItem v-for="fps in availableFps" :key="fps" :value="fps">{{ formatFpsLabel(fps) }}</SelectItem>
-                        <SelectItem v-if="!availableFps.includes(config.video_fps)" :value="config.video_fps">{{ formatFpsLabel(config.video_fps) }}</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                </div>
+                <VideoInputFields
+                  v-if="selectedDevice"
+                  :device="selectedDevice"
+                  :formats="availableFormatOptions"
+                  :resolutions="availableResolutions"
+                  :fps-options="availableFps"
+                  :format="config.video_format"
+                  :resolution="videoResolutionSelection"
+                  :fps="config.video_fps"
+                  :refreshing="refreshingInputStatus"
+                  @update:format="config.video_format = $event"
+                  @update:resolution="videoResolutionSelection = $event"
+                  @update:fps="config.video_fps = $event"
+                  @refresh="refreshInputStatus"
+                />
               </CardContent>
             </Card>
 

@@ -14,8 +14,30 @@ pub async fn get_video_config(State(state): State<Arc<AppState>>) -> Json<VideoC
 
 pub async fn update_video_config(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<VideoConfigUpdate>,
+    Json(mut req): Json<VideoConfigUpdate>,
 ) -> Result<Json<VideoConfig>> {
+    let selected_path = req
+        .device
+        .clone()
+        .or_else(|| state.config.get().video.device.clone());
+    if let Some(path) = selected_path {
+        let source_following = state
+            .stream_manager
+            .list_devices()
+            .await
+            .ok()
+            .and_then(|devices| {
+                devices
+                    .into_iter()
+                    .find(|device| device.path.to_string_lossy() == path)
+            })
+            .is_some_and(|device| {
+                device.control_mode == crate::video::device::VideoControlMode::SourceFollowing
+            });
+        if source_following {
+            req.ignore_source_following_parameters();
+        }
+    }
     req.validate()?;
 
     let _apply_guard = try_apply_lock(&state.config_apply_locks.video, "video")?;

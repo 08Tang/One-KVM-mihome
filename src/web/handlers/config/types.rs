@@ -54,6 +54,22 @@ pub struct VideoConfigUpdate {
 }
 
 impl VideoConfigUpdate {
+    pub fn ignore_source_following_parameters(&mut self) {
+        if self.format.is_some()
+            || self.width.is_some()
+            || self.height.is_some()
+            || self.fps.is_some()
+        {
+            tracing::debug!(
+                "Ignoring client-supplied format, resolution, and FPS for source-following video input"
+            );
+        }
+        self.format = None;
+        self.width = None;
+        self.height = None;
+        self.fps = None;
+    }
+
     pub fn validate(&self) -> crate::error::Result<()> {
         if let Some(width) = self.width {
             if !(320..=7680).contains(&width) {
@@ -103,6 +119,32 @@ impl VideoConfigUpdate {
         if let Some(quality) = self.quality {
             config.quality = quality;
         }
+    }
+}
+
+#[cfg(test)]
+mod video_config_update_tests {
+    use super::VideoConfigUpdate;
+
+    #[test]
+    fn source_following_parameters_are_silently_discarded() {
+        let mut update = VideoConfigUpdate {
+            device: Some("/dev/video0".to_string()),
+            format: Some("MJPEG".to_string()),
+            width: Some(7680),
+            height: Some(4320),
+            fps: Some(120),
+            quality: Some(90),
+        };
+        update.ignore_source_following_parameters();
+
+        assert_eq!(update.device.as_deref(), Some("/dev/video0"));
+        assert!(update.format.is_none());
+        assert!(update.width.is_none());
+        assert!(update.height.is_none());
+        assert!(update.fps.is_none());
+        assert_eq!(update.quality, Some(90));
+        assert!(update.validate().is_ok());
     }
 }
 
