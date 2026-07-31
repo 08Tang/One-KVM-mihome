@@ -134,7 +134,7 @@ fn device_labels(device: &cpal::Device) -> DeviceLabels {
     }
 }
 
-pub(super) fn find_wasapi_device(requested_device: &str) -> Result<cpal::Device> {
+pub(crate) fn find_wasapi_device(requested_device: &str) -> Result<cpal::Device> {
     let host = cpal::default_host();
     let trimmed = requested_device.trim();
 

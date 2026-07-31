@@ -1,8 +1,11 @@
 #[cfg(unix)]
-use axum::{extract::DefaultBodyLimit, routing::delete};
+use axum::{
+    extract::DefaultBodyLimit,
+    routing::{delete, put},
+};
 use axum::{
     middleware,
-    routing::{any, get, patch, post, put},
+    routing::{any, get, patch, post},
     Router,
 };
 use std::sync::Arc;

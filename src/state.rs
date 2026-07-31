@@ -7,9 +7,11 @@ use crate::auth::{SessionStore, TwoFactorService, UserStore};
 use crate::computer_use::ComputerUseManager;
 use crate::config::ConfigStore;
 use crate::db::DatabasePool;
+#[cfg(unix)]
+use crate::events::MsdDeviceMediaInfo;
 use crate::events::{
-    AtxDeviceInfo, AudioDeviceInfo, EventBus, HidDeviceInfo, LedState, MsdDeviceInfo,
-    MsdDeviceMediaInfo, SystemEvent, TtydDeviceInfo, VideoDeviceInfo,
+    AtxDeviceInfo, AudioDeviceInfo, EventBus, HidDeviceInfo, LedState, MsdDeviceInfo, SystemEvent,
+    TtydDeviceInfo, VideoDeviceInfo,
 };
 use crate::extensions::{ExtensionId, ExtensionManager};
 use crate::hid::HidController;
