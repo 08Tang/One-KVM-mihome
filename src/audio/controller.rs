@@ -1,8 +1,7 @@
 //! Device selection, quality presets, streaming.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info};
 
 use super::capture::AudioConfig;
@@ -22,23 +21,37 @@ pub(super) type AudioRecoveredCallback = Arc<dyn Fn() + Send + Sync>;
 pub struct AudioController {
     config: Arc<RwLock<AudioControllerConfig>>,
     streamer: Arc<RwLock<Option<Arc<AudioStreamer>>>>,
-    devices: Arc<RwLock<Vec<AudioDeviceInfo>>>,
     event_bus: Arc<RwLock<Option<Arc<EventBus>>>>,
     monitor: Arc<AudioHealthMonitor>,
-    recovery_in_progress: Arc<AtomicBool>,
+    recovery: recovery::AudioRecovery,
     recovered_callback: Arc<RwLock<Option<AudioRecoveredCallback>>>,
+    operation: Arc<Mutex<()>>,
 }
 
 impl AudioController {
     pub fn new(config: AudioControllerConfig) -> Self {
+        let config = Arc::new(RwLock::new(config));
+        let streamer = Arc::new(RwLock::new(None));
+        let event_bus = Arc::new(RwLock::new(None));
+        let monitor = Arc::new(AudioHealthMonitor::new());
+        let recovered_callback = Arc::new(RwLock::new(None));
+        let operation = Arc::new(Mutex::new(()));
+        let recovery = recovery::AudioRecovery::new(
+            config.clone(),
+            streamer.clone(),
+            event_bus.clone(),
+            monitor.clone(),
+            recovered_callback.clone(),
+            operation.clone(),
+        );
         Self {
-            config: Arc::new(RwLock::new(config)),
-            streamer: Arc::new(RwLock::new(None)),
-            devices: Arc::new(RwLock::new(Vec::new())),
-            event_bus: Arc::new(RwLock::new(None)),
-            monitor: Arc::new(AudioHealthMonitor::new()),
-            recovery_in_progress: Arc::new(AtomicBool::new(false)),
-            recovered_callback: Arc::new(RwLock::new(None)),
+            config,
+            streamer,
+            event_bus,
+            monitor,
+            recovery,
+            recovered_callback,
+            operation,
         }
     }
 
@@ -55,31 +68,6 @@ impl AudioController {
             bus.mark_device_info_dirty();
         }
     }
-    fn spawn_recovery_task(&self, lost_device: String, reason: String) {
-        recovery::spawn_recovery_task(
-            self.config.clone(),
-            self.streamer.clone(),
-            self.event_bus.clone(),
-            self.monitor.clone(),
-            self.recovery_in_progress.clone(),
-            self.recovered_callback.clone(),
-            lost_device,
-            reason,
-        );
-    }
-
-    fn spawn_stream_monitor(&self, streamer: Arc<AudioStreamer>, device: String) {
-        recovery::spawn_stream_monitor(
-            self.config.clone(),
-            self.streamer.clone(),
-            self.event_bus.clone(),
-            self.monitor.clone(),
-            self.recovery_in_progress.clone(),
-            self.recovered_callback.clone(),
-            streamer,
-            device,
-        );
-    }
 
     pub async fn list_devices(&self) -> Result<Vec<AudioDeviceInfo>> {
         let current_device = if self.is_streaming().await {
@@ -88,26 +76,19 @@ impl AudioController {
             None
         };
 
-        let devices = enumerate_audio_devices_with_current(current_device.as_deref())?;
-        *self.devices.write().await = devices.clone();
-        Ok(devices)
-    }
-
-    pub async fn get_cached_devices(&self) -> Vec<AudioDeviceInfo> {
-        self.devices.read().await.clone()
+        enumerate_audio_devices_with_current(current_device.as_deref())
     }
 
     pub async fn select_device(&self, device: &str) -> Result<()> {
+        let _operation = self.operation.lock().await;
+        self.recovery.cancel();
         let devices = self.list_devices().await?;
         let found = devices
             .iter()
             .any(|d| d.name == device || d.description.contains(device));
 
         if !found {
-            return Err(AppError::AudioError(format!(
-                "Audio device not found: {}",
-                device
-            )));
+            return Err(AppError::NotFound(format!("audio device {device}")));
         }
 
         {
@@ -118,14 +99,15 @@ impl AudioController {
         info!("Audio device selected: {}", device);
 
         if self.is_streaming().await {
-            self.stop_streaming().await?;
-            self.start_streaming().await?;
+            self.stop_streaming_inner().await?;
+            self.start_streaming_inner().await?;
         }
 
         Ok(())
     }
 
     pub async fn set_quality(&self, quality: AudioQuality) -> Result<()> {
+        let _operation = self.operation.lock().await;
         {
             let mut config = self.config.write().await;
             config.quality = quality;
@@ -144,6 +126,12 @@ impl AudioController {
     }
 
     pub async fn start_streaming(&self) -> Result<()> {
+        let _operation = self.operation.lock().await;
+        self.recovery.cancel();
+        self.start_streaming_inner().await
+    }
+
+    async fn start_streaming_inner(&self) -> Result<()> {
         {
             let config = self.config.read().await;
             if !config.enabled {
@@ -171,7 +159,7 @@ impl AudioController {
 
         if let Some(error_msg) = select_error {
             self.monitor.report_error(&error_msg, "start_failed").await;
-            self.spawn_recovery_task("auto".to_string(), error_msg.clone());
+            self.recovery.start("auto".to_string(), error_msg.clone());
             self.mark_device_info_dirty().await;
             return Err(AppError::AudioError(error_msg));
         }
@@ -194,7 +182,7 @@ impl AudioController {
             let error_msg = format!("Failed to start audio: {}", e);
 
             self.monitor.report_error(&error_msg, "start_failed").await;
-            self.spawn_recovery_task(device_name.clone(), error_msg.clone());
+            self.recovery.start(device_name.clone(), error_msg.clone());
 
             self.mark_device_info_dirty().await;
 
@@ -203,13 +191,12 @@ impl AudioController {
 
         let streamer_for_monitor = streamer.clone();
         *self.streamer.write().await = Some(streamer);
-        self.spawn_stream_monitor(streamer_for_monitor, device_name.clone());
+        self.recovery
+            .monitor(streamer_for_monitor, device_name.clone());
 
         if self.monitor.is_error().await {
             self.monitor.report_recovered().await;
         }
-
-        self.recovery_in_progress.store(false, Ordering::SeqCst);
 
         self.mark_device_info_dirty().await;
 
@@ -218,7 +205,12 @@ impl AudioController {
     }
 
     pub async fn stop_streaming(&self) -> Result<()> {
-        self.recovery_in_progress.store(false, Ordering::SeqCst);
+        let _operation = self.operation.lock().await;
+        self.stop_streaming_inner().await
+    }
+
+    async fn stop_streaming_inner(&self) -> Result<()> {
+        self.recovery.cancel();
 
         if let Some(streamer) = self.streamer.write().await.take() {
             streamer.stop().await?;
@@ -249,7 +241,7 @@ impl AudioController {
         let (streaming, subscriber_count) = if let Some(ref streamer) = *self.streamer.read().await
         {
             let streaming = streamer.is_running();
-            let subscriber_count = streamer.stats().subscriber_count;
+            let subscriber_count = streamer.subscriber_count();
             (streaming, subscriber_count)
         } else {
             (false, 0)
@@ -278,13 +270,15 @@ impl AudioController {
     }
 
     pub async fn set_enabled(&self, enabled: bool) -> Result<()> {
+        let _operation = self.operation.lock().await;
+        self.recovery.cancel();
         {
             let mut config = self.config.write().await;
             config.enabled = enabled;
         }
 
         if !enabled && self.is_streaming().await {
-            self.stop_streaming().await?;
+            self.stop_streaming_inner().await?;
         }
 
         info!("Audio enabled: {}", enabled);
@@ -292,16 +286,18 @@ impl AudioController {
     }
 
     pub async fn update_config(&self, new_config: AudioControllerConfig) -> Result<()> {
+        let _operation = self.operation.lock().await;
+        self.recovery.cancel();
         let was_streaming = self.is_streaming().await;
 
         if was_streaming {
-            self.stop_streaming().await?;
+            self.stop_streaming_inner().await?;
         }
 
         *self.config.write().await = new_config.clone();
 
         if new_config.enabled {
-            self.start_streaming().await?;
+            self.start_streaming_inner().await?;
         }
 
         Ok(())

@@ -51,7 +51,7 @@ onMounted(() => {
 const statusColor = computed(() => {
   switch (props.status) {
     case 'connected':
-      return 'bg-success'
+      return 'bg-status-active'
     case 'connecting':
       return 'bg-warning animate-pulse'
     case 'disconnected':

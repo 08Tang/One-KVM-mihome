@@ -86,6 +86,8 @@ export interface OtgNetworkConfig {
 export interface MsdConfig {
 	enabled: boolean;
 	msd_dir: string;
+	flash_inquiry_string: string;
+	cdrom_inquiry_string: string;
 }
 
 export enum AtxDriverType {
@@ -146,6 +148,7 @@ export enum EncoderType {
 	Amf = "amf",
 	Rkmpp = "rkmpp",
 	V4l2m2m = "v4l2m2m",
+	Amlogic = "amlogic",
 }
 
 export type BitratePreset = 
@@ -192,12 +195,19 @@ export interface GostcConfig {
 	tls: boolean;
 }
 
+export enum EasytierConfigMode {
+	Quick = "quick",
+	Full = "full",
+}
+
 export interface EasytierConfig {
 	enabled: boolean;
+	config_mode: EasytierConfigMode;
 	network_name: string;
 	network_secret: string;
 	peer_urls: string[];
 	virtual_ip?: string;
+	custom_toml: string;
 }
 
 export enum FrpcConfigMode {
@@ -428,10 +438,12 @@ export interface ComputerUseStartRequest {
 
 export interface EasytierConfigUpdate {
 	enabled?: boolean;
+	config_mode?: EasytierConfigMode;
 	network_name?: string;
 	network_secret?: string;
 	peer_urls?: string[];
 	virtual_ip?: string;
+	custom_toml?: string;
 }
 
 export type ExtensionStatus = 
@@ -546,6 +558,8 @@ export interface HidConfigUpdate {
 export interface MsdConfigUpdate {
 	enabled?: boolean;
 	msd_dir?: string;
+	flash_inquiry_string?: string;
+	cdrom_inquiry_string?: string;
 }
 
 export interface NetworkInterfaceInfo {

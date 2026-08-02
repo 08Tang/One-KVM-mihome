@@ -426,25 +426,9 @@ async fn main() -> anyhow::Result<()> {
         .update_video_config(actual_resolution, actual_format, actual_fps)
         .await;
     if let Some(device_path) = device_path {
-        let (subdev_path, bridge_kind, v4l2_driver) = streamer
-            .current_device()
-            .await
-            .map(|d| {
-                (
-                    d.subdev_path.clone(),
-                    d.bridge_kind.clone(),
-                    Some(d.driver.clone()),
-                )
-            })
-            .unwrap_or((None, None, None));
+        let device_info = streamer.current_device().await;
         webrtc_streamer
-            .set_capture_device(
-                device_path,
-                jpeg_quality,
-                subdev_path,
-                bridge_kind,
-                v4l2_driver,
-            )
+            .set_capture_device(device_path, jpeg_quality, device_info)
             .await;
         tracing::debug!("WebRTC streamer configured for direct capture");
     } else {
@@ -550,7 +534,7 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    let update_service = Arc::new(UpdateService::new(data_dir.join("updates")));
+    let update_service = Arc::new(UpdateService::new());
     let computer_use = ComputerUseManager::new(config_store.clone(), hid.clone());
 
     let state = AppState::new(
@@ -579,20 +563,23 @@ async fn main() -> anyhow::Result<()> {
         data_dir.clone(),
     );
 
-    // Initialize UAC playback writer if UAC is enabled
-    if config.uac.enabled {
-        let uac_cfg = one_kvm::audio::uac_streamer::UacPlaybackConfig {
-            sample_rate: config.uac.sample_rate,
-            channels: config.uac.channels as u16,
-            ..Default::default()
-        };
-        match one_kvm::audio::uac_streamer::UacPlaybackWriter::start(uac_cfg) {
-            Ok(writer) => {
-                *state.uac_playback.write().await = Some(writer);
-                tracing::info!("UAC playback writer started");
-            }
-            Err(e) => {
-                tracing::warn!("Failed to start UAC playback writer: {}", e);
+    #[cfg(unix)]
+    {
+        // Initialize UAC playback writer if UAC is enabled.
+        if config.uac.enabled {
+            let uac_cfg = one_kvm::audio::uac::UacPlaybackConfig {
+                sample_rate: config.uac.sample_rate,
+                channels: config.uac.channels as u16,
+                ..Default::default()
+            };
+            match one_kvm::audio::uac::UacPlayback::start(uac_cfg) {
+                Ok(writer) => {
+                    *state.uac_playback.write().await = Some(writer);
+                    tracing::info!("UAC playback writer started");
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to start UAC playback writer: {}", e);
+                }
             }
         }
     }

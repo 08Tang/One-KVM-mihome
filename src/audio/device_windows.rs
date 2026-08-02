@@ -1,29 +1,12 @@
 use cpal::traits::{DeviceTrait, HostTrait};
 use cpal::DeviceId;
-use serde::Serialize;
 use std::str::FromStr;
 use tracing::{debug, info, warn};
 
+use super::AudioDeviceInfo;
 use crate::error::{AppError, Result};
 
-#[derive(Debug, Clone, Serialize)]
-pub struct AudioDeviceInfo {
-    pub name: String,
-    pub description: String,
-    pub card_index: i32,
-    pub device_index: i32,
-    pub sample_rates: Vec<u32>,
-    pub channels: Vec<u32>,
-    pub is_capture: bool,
-    pub is_hdmi: bool,
-    pub usb_bus: Option<String>,
-}
-
-pub fn enumerate_audio_devices() -> Result<Vec<AudioDeviceInfo>> {
-    enumerate_audio_devices_with_current(None)
-}
-
-pub fn enumerate_audio_devices_with_current(
+pub(super) fn enumerate_audio_devices_with_current(
     current_device: Option<&str>,
 ) -> Result<Vec<AudioDeviceInfo>> {
     let host = cpal::default_host();
@@ -192,8 +175,8 @@ pub(crate) fn find_wasapi_device(requested_device: &str) -> Result<cpal::Device>
     )))
 }
 
-pub fn find_best_audio_device() -> Result<AudioDeviceInfo> {
-    let devices = enumerate_audio_devices()?;
+pub(super) fn find_best_audio_device() -> Result<AudioDeviceInfo> {
+    let devices = enumerate_audio_devices_with_current(None)?;
 
     if devices.is_empty() {
         return Err(AppError::AudioError(

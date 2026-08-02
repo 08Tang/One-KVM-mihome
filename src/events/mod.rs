@@ -6,9 +6,10 @@ use self::types::EXACT_EVENT_TOPICS;
 
 pub use types::{
     AtxDeviceInfo, AudioDeviceInfo, ClientStats, HidDeviceInfo, LedState, MsdDeviceInfo,
-    MsdDeviceMediaInfo, StreamDeviceLostKind, SystemEvent, TtydDeviceInfo, VideoDeviceInfo,
+    MsdDeviceMediaInfo, StreamKind, SystemEvent, TtydDeviceInfo, VideoDeviceInfo,
 };
 
+use std::sync::RwLock;
 use tokio::sync::broadcast;
 
 const EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -40,6 +41,7 @@ pub struct EventBus {
     exact_topics: std::collections::HashMap<&'static str, broadcast::Sender<SystemEvent>>,
     prefix_topics: std::collections::HashMap<String, broadcast::Sender<SystemEvent>>,
     device_info_dirty_tx: broadcast::Sender<()>,
+    latest_video_stream_state: RwLock<Option<SystemEvent>>,
 }
 
 impl EventBus {
@@ -60,11 +62,25 @@ impl EventBus {
             exact_topics,
             prefix_topics,
             device_info_dirty_tx,
+            latest_video_stream_state: RwLock::new(None),
         }
     }
 
     pub fn publish(&self, event: SystemEvent) {
         let event_name = event.event_name();
+
+        if matches!(
+            event,
+            SystemEvent::StreamStateChanged {
+                kind: StreamKind::Video,
+                ..
+            }
+        ) {
+            *self
+                .latest_video_stream_state
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(event.clone());
+        }
 
         if let Some(tx) = self.exact_topics.get(event_name) {
             let _ = tx.send(event.clone());
@@ -103,6 +119,15 @@ impl EventBus {
         self.device_info_dirty_tx.subscribe()
     }
 
+    /// Stateful video status topics replay this value to new WebSocket
+    /// subscribers so a page refresh cannot miss an earlier signal-loss edge.
+    pub fn latest_video_stream_state(&self) -> Option<SystemEvent> {
+        self.latest_video_stream_state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
     pub fn subscriber_count(&self) -> usize {
         self.tx.receiver_count()
     }
@@ -124,6 +149,7 @@ mod tests {
         let mut rx = bus.subscribe();
 
         bus.publish(SystemEvent::StreamStateChanged {
+            kind: StreamKind::Video,
             state: "streaming".to_string(),
             device: Some("/dev/video0".to_string()),
             reason: None,
@@ -132,6 +158,10 @@ mod tests {
 
         let event = rx.recv().await.unwrap();
         assert!(matches!(event, SystemEvent::StreamStateChanged { .. }));
+        assert!(matches!(
+            bus.latest_video_stream_state(),
+            Some(SystemEvent::StreamStateChanged { state, .. }) if state == "streaming"
+        ));
     }
 
     #[tokio::test]
@@ -143,6 +173,7 @@ mod tests {
         assert_eq!(bus.subscriber_count(), 2);
 
         bus.publish(SystemEvent::StreamStateChanged {
+            kind: StreamKind::Video,
             state: "ready".to_string(),
             device: Some("/dev/video0".to_string()),
             reason: None,
@@ -162,6 +193,7 @@ mod tests {
         let mut rx = bus.subscribe_topic("stream.state_changed").unwrap();
 
         bus.publish(SystemEvent::StreamStateChanged {
+            kind: StreamKind::Video,
             state: "ready".to_string(),
             device: None,
             reason: None,
@@ -178,6 +210,7 @@ mod tests {
         let mut rx = bus.subscribe_topic("stream.*").unwrap();
 
         bus.publish(SystemEvent::StreamStateChanged {
+            kind: StreamKind::Video,
             state: "ready".to_string(),
             device: None,
             reason: None,
@@ -200,10 +233,36 @@ mod tests {
         assert_eq!(bus.subscriber_count(), 0);
 
         bus.publish(SystemEvent::StreamStateChanged {
+            kind: StreamKind::Video,
             state: "ready".to_string(),
             device: None,
             reason: None,
             next_retry_ms: None,
         });
+    }
+
+    #[test]
+    fn audio_state_does_not_replace_latest_video_state() {
+        let bus = EventBus::new();
+        bus.publish(SystemEvent::StreamStateChanged {
+            kind: StreamKind::Video,
+            state: "no_signal".to_string(),
+            device: Some("/dev/video0".to_string()),
+            reason: Some("no_sync".to_string()),
+            next_retry_ms: Some(500),
+        });
+        bus.publish(SystemEvent::StreamStateChanged {
+            kind: StreamKind::Audio,
+            state: "streaming".to_string(),
+            device: Some("hw:0,0".to_string()),
+            reason: None,
+            next_retry_ms: None,
+        });
+
+        assert!(matches!(
+            bus.latest_video_stream_state(),
+            Some(SystemEvent::StreamStateChanged { state, reason, .. })
+                if state == "no_signal" && reason.as_deref() == Some("no_sync")
+        ));
     }
 }

@@ -54,6 +54,22 @@ pub struct VideoConfigUpdate {
 }
 
 impl VideoConfigUpdate {
+    pub fn ignore_source_following_parameters(&mut self) {
+        if self.format.is_some()
+            || self.width.is_some()
+            || self.height.is_some()
+            || self.fps.is_some()
+        {
+            tracing::debug!(
+                "Ignoring client-supplied format, resolution, and FPS for source-following video input"
+            );
+        }
+        self.format = None;
+        self.width = None;
+        self.height = None;
+        self.fps = None;
+    }
+
     pub fn validate(&self) -> crate::error::Result<()> {
         if let Some(width) = self.width {
             if !(320..=7680).contains(&width) {
@@ -103,6 +119,32 @@ impl VideoConfigUpdate {
         if let Some(quality) = self.quality {
             config.quality = quality;
         }
+    }
+}
+
+#[cfg(test)]
+mod video_config_update_tests {
+    use super::VideoConfigUpdate;
+
+    #[test]
+    fn source_following_parameters_are_silently_discarded() {
+        let mut update = VideoConfigUpdate {
+            device: Some("/dev/video0".to_string()),
+            format: Some("MJPEG".to_string()),
+            width: Some(7680),
+            height: Some(4320),
+            fps: Some(120),
+            quality: Some(90),
+        };
+        update.ignore_source_following_parameters();
+
+        assert_eq!(update.device.as_deref(), Some("/dev/video0"));
+        assert!(update.format.is_none());
+        assert!(update.width.is_none());
+        assert!(update.height.is_none());
+        assert!(update.fps.is_none());
+        assert_eq!(update.quality, Some(90));
+        assert!(update.validate().is_ok());
     }
 }
 
@@ -476,6 +518,8 @@ impl OtgNetworkConfigUpdate {
 pub struct MsdConfigUpdate {
     pub enabled: Option<bool>,
     pub msd_dir: Option<String>,
+    pub flash_inquiry_string: Option<String>,
+    pub cdrom_inquiry_string: Option<String>,
 }
 
 #[cfg(unix)]
@@ -492,6 +536,12 @@ impl MsdConfigUpdate {
                 ));
             }
         }
+        if let Some(ref value) = self.flash_inquiry_string {
+            MsdConfig::validate_inquiry_string("Flash", value)?;
+        }
+        if let Some(ref value) = self.cdrom_inquiry_string {
+            MsdConfig::validate_inquiry_string("CD-ROM", value)?;
+        }
         Ok(())
     }
 
@@ -501,6 +551,12 @@ impl MsdConfigUpdate {
         }
         if let Some(ref dir) = self.msd_dir {
             config.msd_dir = dir.trim().to_string();
+        }
+        if let Some(ref value) = self.flash_inquiry_string {
+            config.flash_inquiry_string = value.trim().to_string();
+        }
+        if let Some(ref value) = self.cdrom_inquiry_string {
+            config.cdrom_inquiry_string = value.trim().to_string();
         }
     }
 }

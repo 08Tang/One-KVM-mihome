@@ -5,7 +5,6 @@ use audiopus::{coder::Encoder, Application, Bitrate, Channels, SampleRate};
 use bytes::Bytes;
 use tracing::debug;
 
-use super::capture::AudioFrame;
 use crate::error::{AppError, Result};
 
 #[derive(Debug, Clone)]
@@ -152,11 +151,6 @@ impl OpusEncoder {
             duration_ms,
             sequence: self.frame_count - 1,
         })
-    }
-
-    pub fn encode_frame(&mut self, frame: &AudioFrame) -> Result<OpusFrame> {
-        let samples: &[i16] = bytemuck::cast_slice(&frame.data);
-        self.encode(samples)
     }
 
     pub fn config(&self) -> &OpusConfig {

@@ -3,7 +3,6 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
-import { Label } from '@/components/ui/label'
 import { Progress } from '@/components/ui/progress'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { CornerDownLeft, Square, AlertCircle } from 'lucide-vue-next'
@@ -17,7 +16,7 @@ const emit = defineEmits<{
 const { t } = useI18n()
 
 const text = ref('')
-const textareaRef = ref<HTMLTextAreaElement | null>(null)
+const textareaRef = ref<{ focus: (options?: FocusOptions) => void } | null>(null)
 const isPasting = ref(false)
 const progress = ref(0)
 const currentChar = ref(0)
@@ -36,9 +35,7 @@ const hasUntypableChars = computed(() => {
 })
 
 onMounted(() => {
-  setTimeout(() => {
-    textareaRef.value?.focus()
-  }, 100)
+  textareaRef.value?.focus()
 })
 
 onUnmounted(() => {
@@ -184,24 +181,19 @@ function handleKeydown(e: KeyboardEvent) {
 
 <template>
   <div class="p-4 space-y-4">
-    <div class="space-y-1">
-      <h3 class="font-semibold text-sm">{{ t('paste.title') }}</h3>
-      <p class="text-xs text-muted-foreground">{{ t('paste.description') }}</p>
-    </div>
+    <h3 class="font-semibold text-sm">{{ t('paste.title') }}</h3>
 
-    <div class="space-y-2">
-      <Label for="paste-text">{{ t('paste.label') }}</Label>
-      <Textarea
-        id="paste-text"
-        ref="textareaRef"
-        v-model="text"
-        :placeholder="t('paste.placeholder')"
-        class="min-h-[120px] resize-none font-mono text-sm"
-        :disabled="isPasting"
-        @keydown="handleKeydown"
-        @keyup.stop
-      />
-    </div>
+    <Textarea
+      id="paste-text"
+      ref="textareaRef"
+      v-model="text"
+      :aria-label="t('paste.title')"
+      :placeholder="t('paste.placeholder')"
+      class="min-h-[120px] resize-none text-sm"
+      :disabled="isPasting"
+      @keydown="handleKeydown"
+      @keyup.stop
+    />
 
     <!-- Warning for untypable characters -->
     <Alert v-if="hasUntypableChars && !isPasting" variant="warning">

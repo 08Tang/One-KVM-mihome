@@ -49,9 +49,14 @@ fn is_device_info_topic(topic: &str) -> bool {
     matches!(topic, "*" | "system.*" | "system.device_info")
 }
 
+fn is_stream_state_topic(topic: &str) -> bool {
+    matches!(topic, "*" | "stream.*" | "stream.state_changed")
+}
+
 fn rebuild_event_tasks(
     state: &Arc<AppState>,
     topics: &[String],
+    replay_stream_state: bool,
     event_tx: &mpsc::UnboundedSender<BusMessage>,
     event_tasks: &mut Vec<JoinHandle<()>>,
 ) {
@@ -61,7 +66,17 @@ fn rebuild_event_tasks(
 
     let topics = normalize_topics(topics);
     let mut device_info_task_added = false;
+    let mut stream_state_snapshot_added = false;
     for topic in topics {
+        if replay_stream_state && is_stream_state_topic(&topic) && !stream_state_snapshot_added {
+            if let Some(snapshot) = state.events.latest_video_stream_state() {
+                if event_tx.send(BusMessage::Event(snapshot)).is_err() {
+                    return;
+                }
+            }
+            stream_state_snapshot_added = true;
+        }
+
         if is_device_info_topic(&topic) && !device_info_task_added {
             let state = state.clone();
             let mut rx = state.subscribe_device_info();
@@ -157,12 +172,19 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
             msg = receiver.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
+                        let had_stream_state = normalize_topics(&subscribed_topics)
+                            .iter()
+                            .any(|topic| is_stream_state_topic(topic));
                         if let Err(e) = handle_client_message(&text, &mut subscribed_topics).await {
                             warn!("Failed to handle client message: {}", e);
                         } else {
+                            let has_stream_state = normalize_topics(&subscribed_topics)
+                                .iter()
+                                .any(|topic| is_stream_state_topic(topic));
                             rebuild_event_tasks(
                                 &state,
                                 &subscribed_topics,
+                                !had_stream_state && has_stream_state,
                                 &event_tx,
                                 &mut event_tasks,
                             );
@@ -307,5 +329,14 @@ mod tests {
         assert!(is_device_info_topic("system.*"));
         assert!(is_device_info_topic("*"));
         assert!(!is_device_info_topic("stream.*"));
+    }
+
+    #[test]
+    fn test_is_stream_state_topic_matches_stateful_subscriptions() {
+        assert!(is_stream_state_topic("*"));
+        assert!(is_stream_state_topic("stream.*"));
+        assert!(is_stream_state_topic("stream.state_changed"));
+        assert!(!is_stream_state_topic("stream.stats_update"));
+        assert!(!is_stream_state_topic("system.device_info"));
     }
 }

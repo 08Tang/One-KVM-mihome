@@ -163,9 +163,9 @@ class Reporter:
             "",
             f"- 运行编号：`{run_id}`",
             "- 测试设备：",
-            f"- 视频设备：{markdown_inline(self.user_video_device())}",
-            f"- HID设备：{markdown_inline(self.user_hid_backend())}",
-            f"- 网络延迟：{markdown_inline(self.user_network_latency())}",
+            f"- 视频设备：{self.user_video_device()}",
+            f"- HID 设备：{markdown_inline(self.user_hid_backend())}",
+            f"- HTTP 延迟：{markdown_inline(self.user_http_latency())}",
             "",
             "## 视频性能",
             "",
@@ -192,7 +192,7 @@ class Reporter:
         lines.extend(
             [
                 "",
-                "## HID性能",
+                "## HID 性能",
                 "",
                 "| 输入方式 | 延迟统计（中位数 p50 / 95%分位 p95 / 最大值 max） |",
                 "| --- | --- |",
@@ -208,7 +208,7 @@ class Reporter:
         lines.extend(
             [
                 "",
-                "## MSD性能",
+                "## MSD 性能",
                 "",
                 "| 操作 | 数据 |",
                 "| --- | --- |",
@@ -229,14 +229,14 @@ class Reporter:
                 return result
         return None
 
-    def user_network_latency(self) -> str:
+    def user_http_latency(self) -> str:
         result = self.find_result("network_latency")
         if not result:
             return "无数据"
-        tcp = result.data.get("tcp_connect") or {}
-        if tcp.get("samples"):
-            return format_latency_values(tcp)
-        return result.message or "无数据"
+        http = result.data.get("http_health") or {}
+        if http.get("samples"):
+            return format_latency_values(http)
+        return "无数据"
 
     def user_video_device(self) -> str:
         result = self.find_result("video_input_select")
@@ -249,7 +249,9 @@ class Reporter:
                 continue
             device = str(case.get("device") or "未知设备")
             by_device.setdefault(device, []).append(format_video_case(case))
-        return "；".join(f"{device}：{', '.join(items)}" for device, items in by_device.items()) or "无数据"
+        return "；".join(
+            f"{markdown_code(device)}（{'、'.join(items)}）" for device, items in by_device.items()
+        ) or "无数据"
 
     def user_hid_backend(self) -> str:
         config = self.find_result("hid_msd_config")
@@ -317,11 +319,11 @@ class Reporter:
         verify = result.data.get("verify") or {}
         rows: list[tuple[str, str]] = []
         if "write_mib_s" in verify:
-            rows.append(("写", f"{float(verify.get('write_mib_s') or 0):.2f}MiB/s"))
+            rows.append(("写", f"{float(verify.get('write_mib_s') or 0):.2f} MiB/s"))
         if "read_mib_s" in verify:
-            rows.append(("读", f"{float(verify.get('read_mib_s') or 0):.2f}MiB/s"))
+            rows.append(("读", f"{float(verify.get('read_mib_s') or 0):.2f} MiB/s"))
         elif "cached_read_mib_s" in verify:
-            rows.append(("读（缓存，仅校验）", f"{float(verify.get('cached_read_mib_s') or 0):.2f}MiB/s"))
+            rows.append(("读（缓存，仅校验）", f"{float(verify.get('cached_read_mib_s') or 0):.2f} MiB/s"))
         if rows:
             return rows
         return [("MSD", f"{STATUS_TEXT.get(result.status, result.status)}：{result.message}" if result.message else STATUS_TEXT.get(result.status, result.status))]
@@ -589,19 +591,30 @@ def display_name(name: str) -> str:
 
 
 def format_video_case(case: dict[str, Any]) -> str:
-    fmt = str(case.get("fmt") or "").lower()
+    fmt = format_video_codec(case.get("fmt"))
     resolution = format_resolution(case)
     fps = format_fps_value(case.get("fps"))
     return " ".join(part for part in (f"{resolution}@{fps}" if resolution and fps else resolution or fps, fmt) if part)
 
 
 def format_video_latency_params(case: dict[str, Any], output_mode: str) -> str:
-    fmt = str(case.get("fmt") or "").lower()
-    output = output_mode.lower() if output_mode else "unknown"
+    fmt = format_video_codec(case.get("fmt"))
+    output = format_video_codec(output_mode) if output_mode else "UNKNOWN"
     resolution = format_resolution(case)
     fps = format_fps_value(case.get("fps"))
     input_part = " ".join(part for part in (f"{resolution}@{fps}" if resolution and fps else resolution or fps, fmt) if part)
-    return f"{input_part}-->{output}" if input_part else output
+    return f"{input_part} → {output}" if input_part else output
+
+
+def format_video_codec(value: Any) -> str:
+    codec = str(value or "").strip()
+    normalized = codec.lower().replace(".", "").replace("-", "").replace("_", "")
+    names = {
+        "h264": "H.264",
+        "h265": "H.265",
+        "mjpeg": "MJPEG",
+    }
+    return names.get(normalized, codec.upper())
 
 
 def format_resolution(case: dict[str, Any]) -> str:
@@ -657,6 +670,10 @@ def has_numeric_data(result: CheckResult, metrics: list[Metric]) -> bool:
 
 def markdown_inline(value: str) -> str:
     return str(value).replace("\n", " | ").replace("`", "'")
+
+
+def markdown_code(value: str) -> str:
+    return f"`{markdown_inline(value)}`"
 
 
 def markdown_table_cell(value: str) -> str:

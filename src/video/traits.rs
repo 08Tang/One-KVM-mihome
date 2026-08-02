@@ -10,6 +10,7 @@ use super::types::{
 use crate::error::Result;
 use crate::events::EventBus;
 use crate::hid::HidController;
+use crate::video::device::VideoDeviceInfo;
 
 /// Trait for video output consumers that receive encoded video frames.
 ///
@@ -24,14 +25,12 @@ pub trait VideoOutput: Send + Sync {
         &self,
         device_path: PathBuf,
         jpeg_quality: u8,
-        subdev_path: Option<PathBuf>,
-        bridge_kind: Option<String>,
-        v4l2_driver: Option<String>,
+        device_info: Option<VideoDeviceInfo>,
     );
     async fn current_video_codec(&self) -> VideoCodecType;
     async fn is_hardware_encoding(&self) -> bool;
     async fn close_all_sessions(&self);
-    async fn close_all_sessions_and_release_device(&self) -> usize;
+    async fn close_all_sessions_and_release_device(&self) -> Result<usize>;
     async fn session_count(&self) -> usize;
     async fn set_hid_controller(&self, hid: Arc<HidController>);
     async fn set_audio_enabled(&self, enabled: bool) -> Result<()>;

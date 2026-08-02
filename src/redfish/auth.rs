@@ -88,10 +88,7 @@ mod tests {
     #[test]
     fn only_service_discovery_and_session_creation_are_public() {
         assert!(is_redfish_public_endpoint("/v1/", &Method::GET));
-        assert!(is_redfish_public_endpoint(
-            "/v1/$metadata",
-            &Method::GET
-        ));
+        assert!(is_redfish_public_endpoint("/v1/$metadata", &Method::GET));
         assert!(is_redfish_public_endpoint(
             "/v1/SessionService/Sessions",
             &Method::POST

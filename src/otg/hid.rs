@@ -3,6 +3,7 @@ use tracing::debug;
 
 use super::configfs::{
     create_dir, create_symlink, remove_dir, remove_file, write_bytes, write_file,
+    write_file_if_exists,
 };
 use super::function::GadgetFunction;
 use super::report_desc::{
@@ -142,6 +143,10 @@ impl GadgetFunction for HidFunction {
             &func_path.join("report_desc"),
             self.func_type.report_desc(self.keyboard_leds),
         )?;
+
+        // Supported by the PiKVM HID kernel patch. Older kernels simply do
+        // not expose this ConfigFS attribute.
+        let _ = write_file_if_exists(&func_path.join("wakeup_on_write"), "1")?;
 
         debug!(
             "Created HID function: {} at {}",

@@ -22,6 +22,7 @@ pub enum ProbeResult {
     NoSync,
     OutOfRange,
     NoSignal,
+    Unavailable,
 }
 
 impl ProbeResult {
@@ -32,6 +33,7 @@ impl ProbeResult {
             ProbeResult::NoSync => Some(SignalStatus::NoSync),
             ProbeResult::OutOfRange => Some(SignalStatus::OutOfRange),
             ProbeResult::NoSignal => Some(SignalStatus::NoSignal),
+            ProbeResult::Unavailable => None,
         }
     }
 

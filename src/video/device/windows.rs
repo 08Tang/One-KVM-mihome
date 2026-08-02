@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+use super::{VideoControlMode, VideoInputStatus};
 use crate::error::{AppError, Result};
 use crate::video::format::{PixelFormat, Resolution};
 
@@ -16,6 +17,8 @@ pub struct VideoDeviceInfo {
     pub is_capture_card: bool,
     pub priority: u32,
     pub has_signal: bool,
+    pub control_mode: VideoControlMode,
+    pub input_status: VideoInputStatus,
     pub subdev_path: Option<PathBuf>,
     pub bridge_kind: Option<String>,
 }
@@ -113,6 +116,10 @@ impl VideoDevice {
                 ))
             })
     }
+
+    pub fn input_status(&self) -> Result<VideoInputStatus> {
+        Ok(self.info()?.input_status)
+    }
 }
 
 pub(crate) fn normalize_windows_device_path(path: impl AsRef<Path>) -> PathBuf {
@@ -198,6 +205,8 @@ fn directshow_device_from_name(index: usize, name: String) -> VideoDeviceInfo {
         is_capture_card: true,
         priority,
         has_signal: true,
+        control_mode: VideoControlMode::Configurable,
+        input_status: VideoInputStatus::unavailable(),
         subdev_path: None,
         bridge_kind: None,
     }

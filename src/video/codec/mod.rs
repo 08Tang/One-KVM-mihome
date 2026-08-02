@@ -3,6 +3,7 @@
 use hwcodec::common::DataFormat;
 use hwcodec::ffmpeg_ram::CodecInfo;
 
+pub mod amlenc;
 pub mod convert;
 
 pub mod h264;
@@ -19,6 +20,7 @@ pub mod vp9;
 #[cfg(all(feature = "desktop", any(target_arch = "aarch64", target_arch = "arm")))]
 pub mod mjpeg_rkmpp;
 
+pub use amlenc::{AmlencCodec, AmlencConfig, AmlencEncoder};
 pub use convert::{MjpegToNv12Decoder, PixelConverter, Yuv420pBuffer};
 pub use h264::{H264Config, H264Encoder, H264EncoderType, H264InputFormat};
 pub use h265::{H265Config, H265Encoder, H265EncoderType, H265InputFormat};

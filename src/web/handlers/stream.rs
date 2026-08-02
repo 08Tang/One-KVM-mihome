@@ -1,5 +1,6 @@
 use super::*;
 
+use crate::events::SystemEvent;
 use crate::video::streamer::StreamerStats;
 use axum::{
     body::Body,
@@ -16,7 +17,17 @@ fn stream_mode_label(mode: StreamMode, codec: crate::video::codec::VideoCodecTyp
 
 /// Get stream state
 pub async fn stream_state(State(state): State<Arc<AppState>>) -> Json<StreamerStats> {
-    Json(state.stream_manager.stats().await)
+    let mut stats = state.stream_manager.stats().await;
+    if let Some(SystemEvent::StreamStateChanged {
+        state: event_state,
+        reason,
+        ..
+    }) = state.events.latest_video_stream_state()
+    {
+        stats.state = event_state;
+        stats.reason = reason;
+    }
+    Json(stats)
 }
 
 /// Start streaming

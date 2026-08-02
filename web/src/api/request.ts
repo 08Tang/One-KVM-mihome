@@ -29,11 +29,13 @@ function hasTranslation(key: string): boolean {
 
 export class ApiError extends Error {
   status: number
+  code?: string
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, code?: string) {
     super(message)
     this.name = 'ApiError'
     this.status = status
+    this.code = code
   }
 }
 
@@ -47,18 +49,69 @@ export interface ApiRequestConfig {
    * Toast debounce key. Defaults to `error_${endpoint}`.
    */
   toastKey?: string
+  /** Translation key used as the error toast title. */
+  errorTitleKey?: string
 }
 
 function getToastKey(endpoint: string, config?: ApiRequestConfig): string {
   return config?.toastKey ?? `error_${endpoint}`
 }
 
-function getErrorMessage(data: unknown, fallback: string): string {
+function isAuthenticationIssue(status: number, message: string): boolean {
+  const normalized = message.toLowerCase()
+  return status === 401 && (
+    normalized.includes('not authenticated')
+    || normalized.includes('session expired')
+    || normalized.includes('logged in elsewhere')
+  )
+}
+
+const msdErrorKeys: Record<string, string> = {
+  MSD_UNAVAILABLE: 'msd.errors.unavailable',
+  MSD_OPERATION_IN_PROGRESS: 'msd.errors.operationInProgress',
+  MSD_OPERATION_FAILED: 'msd.errors.operationFailed',
+  MSD_INVALID_REQUEST: 'msd.errors.invalidRequest',
+  MSD_RESOURCE_NOT_FOUND: 'msd.errors.resourceNotFound',
+  MSD_RESOURCE_ALREADY_EXISTS: 'msd.errors.resourceAlreadyExists',
+  MSD_MEDIA_SLOTS_FULL: 'msd.errors.mediaSlotsFull',
+  MSD_MEDIA_ALREADY_MOUNTED: 'msd.errors.mediaAlreadyMounted',
+  MSD_MEDIA_IN_USE: 'msd.errors.mediaInUse',
+  MSD_IMAGE_TOO_LARGE: 'msd.errors.imageTooLarge',
+  MSD_INVALID_URL: 'msd.errors.invalidUrl',
+  MSD_REMOTE_DOWNLOAD_FAILED: 'msd.errors.remoteDownloadFailed',
+  MSD_DOWNLOAD_INCOMPLETE: 'msd.errors.downloadIncomplete',
+  MSD_DRIVE_NOT_INITIALIZED: 'msd.errors.driveNotInitialized',
+  MSD_DRIVE_CONNECTED: 'msd.errors.driveConnected',
+  MSD_DRIVE_FILESYSTEM_UNSUPPORTED: 'msd.errors.driveFilesystemUnsupported',
+  MSD_DRIVE_SIZE_INVALID: 'msd.errors.driveSizeInvalid',
+  MSD_STORAGE_SPACE_UNAVAILABLE: 'msd.errors.storageSpaceUnavailable',
+  MSD_STORAGE_FULL: 'msd.errors.storageFull',
+  MSD_STORAGE_READ_ONLY: 'msd.errors.storageReadOnly',
+  MSD_STORAGE_PERMISSION_DENIED: 'msd.errors.storagePermissionDenied',
+  MSD_MEDIUM_REMOVAL_PREVENTED: 'msd.errors.mediumRemovalPrevented',
+  MSD_DISCONNECT_FAILED: 'msd.errors.disconnectFailed',
+}
+
+export function localizeMsdErrorCode(code?: string, fallback?: string): string {
+  const key = code ? msdErrorKeys[code] : undefined
+  if (key && hasTranslation(key)) return t(key)
+  return fallback ? localizeBackendErrorMessage(fallback) : t('msd.errors.operationFailed')
+}
+
+function getErrorDetails(data: unknown, fallback: string): { message: string; code?: string } {
   if (data && typeof data === 'object') {
+    const code = (data as any).code
+    const normalizedCode = typeof code === 'string' ? code : undefined
+    if (normalizedCode && msdErrorKeys[normalizedCode]) {
+      return { message: localizeMsdErrorCode(normalizedCode), code: normalizedCode }
+    }
+
     const message = (data as any).message
-    if (typeof message === 'string' && message.trim()) return localizeBackendErrorMessage(message)
+    if (typeof message === 'string' && message.trim()) {
+      return { message: localizeBackendErrorMessage(message), code: normalizedCode }
+    }
   }
-  return localizeBackendErrorMessage(fallback)
+  return { message: localizeBackendErrorMessage(fallback) }
 }
 
 function extractCh9329Command(reason: string): string {
@@ -133,6 +186,7 @@ export async function request<T>(
   const url = `${API_BASE}${endpoint}`
   const toastOnError = config.toastOnError !== false
   const toastKey = getToastKey(endpoint, config)
+  const errorTitle = t(config.errorTitleKey ?? 'api.operationFailed')
 
   try {
     const response = await fetch(url, {
@@ -148,40 +202,35 @@ export async function request<T>(
 
     // Handle HTTP errors (in case backend returns non-2xx)
     if (!response.ok) {
-      const message = getErrorMessage(data, `HTTP ${response.status}`)
-      const normalized = message.toLowerCase()
-      const isNotAuthenticated = normalized.includes('not authenticated')
-      const isSessionExpired = normalized.includes('session expired')
-      const isLoggedInElsewhere = normalized.includes('logged in elsewhere')
-      const isAuthIssue = response.status === 401 && (isNotAuthenticated || isSessionExpired || isLoggedInElsewhere)
-      if (toastOnError && shouldShowToast(toastKey) && !isAuthIssue) {
-        toast.error(t('api.operationFailed'), {
+      const { message, code } = getErrorDetails(data, `HTTP ${response.status}`)
+      if (toastOnError && shouldShowToast(toastKey) && !isAuthenticationIssue(response.status, message)) {
+        toast.error(errorTitle, {
           description: message,
           duration: 4000,
         })
       }
-      throw new ApiError(response.status, message)
+      throw new ApiError(response.status, message, code)
     }
 
     // Handle backend "success=false" convention (even when HTTP is 200)
     if (data && typeof (data as any).success === 'boolean' && !(data as any).success) {
-      const message = getErrorMessage(data, t('api.operationFailedDesc'))
+      const { message, code } = getErrorDetails(data, t('api.operationFailedDesc'))
 
       if (toastOnError && shouldShowToast(toastKey)) {
-        toast.error(t('api.operationFailed'), {
+        toast.error(errorTitle, {
           description: message,
           duration: 4000,
         })
       }
 
-      throw new ApiError(response.status, message)
+      throw new ApiError(response.status, message, code)
     }
 
     // If response body isn't JSON (or empty), treat as failure for callers expecting JSON.
     if (data === null) {
       const message = t('api.parseResponseFailed')
       if (toastOnError && shouldShowToast(toastKey)) {
-        toast.error(t('api.operationFailed'), {
+        toast.error(errorTitle, {
           description: message,
           duration: 4000,
         })
@@ -202,4 +251,56 @@ export async function request<T>(
 
     throw new ApiError(0, t('api.networkError'))
   }
+}
+
+export function uploadRequest<T>(
+  endpoint: string,
+  formData: FormData,
+  onProgress?: (progress: number) => void,
+  config: ApiRequestConfig = {},
+): Promise<T> {
+  const xhr = new XMLHttpRequest()
+  xhr.open('POST', `${API_BASE}${endpoint}`)
+  xhr.withCredentials = true
+
+  return new Promise<T>((resolve, reject) => {
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable && onProgress) onProgress((event.loaded / event.total) * 100)
+    }
+
+    xhr.onload = () => {
+      const data: unknown = (() => {
+        try { return JSON.parse(xhr.responseText) } catch { return null }
+      })()
+      if (xhr.status >= 200 && xhr.status < 300 && data !== null) {
+        resolve(data as T)
+        return
+      }
+
+      const { message, code } = getErrorDetails(data, `HTTP ${xhr.status}`)
+      const error = new ApiError(xhr.status, message, code)
+      if (
+        config.toastOnError !== false
+        && shouldShowToast(getToastKey(endpoint, config))
+        && !isAuthenticationIssue(xhr.status, message)
+      ) {
+        toast.error(t(config.errorTitleKey ?? 'api.operationFailed'), {
+          description: message,
+          duration: 4000,
+        })
+      }
+      reject(error)
+    }
+
+    xhr.onerror = () => {
+      if (config.toastOnError !== false && shouldShowToast('network_error')) {
+        toast.error(t('api.networkError'), {
+          description: t('api.networkErrorDesc'),
+          duration: 4000,
+        })
+      }
+      reject(new ApiError(0, t('api.networkError')))
+    }
+    xhr.send(formData)
+  })
 }

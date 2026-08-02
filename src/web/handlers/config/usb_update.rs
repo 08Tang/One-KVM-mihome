@@ -55,6 +55,7 @@ where
             staged_config.otg_network.host_mac = host_mac;
         }
         staged_config.otg_network.validate()?;
+        staged_config.uac.validate()?;
     }
 
     if let Err(error) = apply_usb_config(state, &old_config, &staged_config).await {
@@ -92,6 +93,7 @@ where
             config.hid = staged_config.hid.clone();
             config.msd = staged_config.msd.clone();
             config.otg_network = staged_config.otg_network.clone();
+            config.uac = staged_config.uac.clone();
             config.enforce_invariants();
         })
         .await

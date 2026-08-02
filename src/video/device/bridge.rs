@@ -3,6 +3,7 @@
 use std::fs::File;
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
@@ -14,7 +15,9 @@ use tracing::{debug, info, warn};
 use v4l2r::bindings::{
     v4l2_bt_timings, v4l2_dv_timings, V4L2_DV_BT_656_1120, V4L2_DV_FL_HAS_CEA861_VIC,
 };
-use v4l2r::ioctl::{self, Event as V4l2Event, EventType, QueryDvTimingsError, SubscribeEventFlags};
+use v4l2r::ioctl::{
+    self, Event as V4l2Event, EventType, IntoErrno, QueryDvTimingsError, SubscribeEventFlags,
+};
 use v4l2r::nix::errno::Errno;
 
 use crate::video::signal::SignalStatus;
@@ -53,6 +56,7 @@ pub enum ProbeResult {
     NoSync,
     OutOfRange,
     NoSignal,
+    Unavailable,
 }
 
 impl ProbeResult {
@@ -63,6 +67,7 @@ impl ProbeResult {
             ProbeResult::NoSync => Some(SignalStatus::NoSync),
             ProbeResult::OutOfRange => Some(SignalStatus::OutOfRange),
             ProbeResult::NoSignal => Some(SignalStatus::NoSignal),
+            ProbeResult::Unavailable => None,
         }
     }
 
@@ -132,19 +137,58 @@ fn read_sysfs_name(subdev_sysfs: &Path) -> Option<String> {
 }
 
 pub fn open_subdev(path: &Path) -> io::Result<File> {
-    File::options().read(true).write(true).open(path)
+    File::options()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+}
+
+/// Drain a non-blocking V4L2 event queue until the driver reports that it is
+/// empty.  Both video nodes and subdevices use the same event ioctl contract.
+pub fn drain_v4l2_events(fd: &File) -> u32 {
+    let mut drained = 0u32;
+    loop {
+        match ioctl::dqevent::<V4l2Event>(fd) {
+            Ok(_event) => {
+                drained = drained.saturating_add(1);
+                if drained >= 16 {
+                    break;
+                }
+            }
+            Err(error) => {
+                let message = error.to_string();
+                let errno = error.into_errno();
+                if errno != Errno::EAGAIN as i32 && errno != Errno::ENOENT as i32 {
+                    debug!("Failed to drain V4L2 event queue: {}", message);
+                }
+                break;
+            }
+        }
+    }
+    drained
 }
 
 pub fn probe_signal(subdev_fd: &impl AsRawFd, kind: CsiBridgeKind) -> ProbeResult {
     match ioctl::query_dv_timings::<v4l2_dv_timings>(subdev_fd) {
         Ok(timings) => classify_timings(timings, kind),
-        Err(QueryDvTimingsError::NoLink) => ProbeResult::NoCable,
-        Err(QueryDvTimingsError::UnstableSignal) => ProbeResult::NoSync,
-        Err(QueryDvTimingsError::IoctlError(Errno::ERANGE)) => ProbeResult::OutOfRange,
-        Err(QueryDvTimingsError::IoctlError(Errno::EIO | Errno::EREMOTEIO | Errno::ETIMEDOUT)) => {
+        Err(error) => classify_query_error(&error, kind),
+    }
+}
+
+fn classify_query_error(error: &QueryDvTimingsError, kind: CsiBridgeKind) -> ProbeResult {
+    match error {
+        QueryDvTimingsError::NoLink => ProbeResult::NoCable,
+        QueryDvTimingsError::UnstableSignal => ProbeResult::NoSync,
+        QueryDvTimingsError::IoctlError(Errno::ERANGE) => ProbeResult::OutOfRange,
+        QueryDvTimingsError::IoctlError(Errno::EIO | Errno::EREMOTEIO | Errno::ETIMEDOUT) => {
             ProbeResult::NoSync
         }
-        Err(QueryDvTimingsError::Unsupported) | Err(QueryDvTimingsError::IoctlError(_)) => {
+        QueryDvTimingsError::Unsupported
+        | QueryDvTimingsError::IoctlError(
+            Errno::ENOTTY | Errno::EINVAL | Errno::ENOSYS | Errno::EOPNOTSUPP,
+        ) if kind == CsiBridgeKind::Unknown => ProbeResult::Unavailable,
+        QueryDvTimingsError::Unsupported | QueryDvTimingsError::IoctlError(_) => {
             ProbeResult::NoSignal
         }
     }
@@ -179,7 +223,7 @@ pub fn probe_signal_thread_timeout(
             Some(r)
         }
         Err(mpsc::RecvTimeoutError::Timeout) => {
-            warn!(
+            debug!(
                 "QUERY_DV_TIMINGS exceeded {:?} (RK628 HDMI mode change?) — abandoning probe thread",
                 limit
             );
@@ -286,13 +330,7 @@ pub fn wait_source_change(subdev_fd: &File, timeout: Duration) -> io::Result<boo
         }
     }
 
-    let mut drained = 0u32;
-    while let Ok(_ev) = ioctl::dqevent::<V4l2Event>(subdev_fd) {
-        drained = drained.saturating_add(1);
-        if drained >= 16 {
-            break;
-        }
-    }
+    let drained = drain_v4l2_events(subdev_fd);
     debug!("subdev source_change drained {} event(s)", drained);
     Ok(true)
 }
@@ -300,6 +338,15 @@ pub fn wait_source_change(subdev_fd: &File, timeout: Duration) -> io::Result<boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subdevice_handles_are_non_blocking() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let opened = open_subdev(file.path()).unwrap();
+        let flags = unsafe { libc::fcntl(opened.as_raw_fd(), libc::F_GETFL) };
+        assert!(flags >= 0);
+        assert_ne!(flags & libc::O_NONBLOCK, 0);
+    }
 
     #[test]
     fn rk628_fingerprint_matches_vga() {
@@ -351,5 +398,28 @@ mod tests {
             Some(CsiBridgeKind::Tc358743)
         );
         assert_eq!(CsiBridgeKind::from_subdev_name("mystery"), None);
+    }
+
+    #[test]
+    fn query_errno_mapping_distinguishes_signal_loss_from_unsupported_nodes() {
+        assert!(matches!(
+            classify_query_error(&QueryDvTimingsError::NoLink, CsiBridgeKind::RkHdmirx),
+            ProbeResult::NoCable
+        ));
+        assert!(matches!(
+            classify_query_error(
+                &QueryDvTimingsError::UnstableSignal,
+                CsiBridgeKind::RkHdmirx
+            ),
+            ProbeResult::NoSync
+        ));
+        assert!(matches!(
+            classify_query_error(&QueryDvTimingsError::Unsupported, CsiBridgeKind::RkHdmirx),
+            ProbeResult::NoSignal
+        ));
+        assert!(matches!(
+            classify_query_error(&QueryDvTimingsError::Unsupported, CsiBridgeKind::Unknown),
+            ProbeResult::Unavailable
+        ));
     }
 }

@@ -28,7 +28,7 @@ pub use msd::{MsdFunction, MsdLunConfig};
 #[cfg(unix)]
 pub use network::NetworkFunction;
 #[cfg(unix)]
-pub use service::{HidDevicePaths, OtgNetworkStatus, OtgRuntimeHealth, OtgService, UacConfig};
+pub use service::{HidDevicePaths, OtgNetworkStatus, OtgRuntimeHealth, OtgService};
 #[cfg(unix)]
 pub use uac::UacFunction;
 
