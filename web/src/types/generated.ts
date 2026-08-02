@@ -148,6 +148,7 @@ export enum EncoderType {
 	Amf = "amf",
 	Rkmpp = "rkmpp",
 	V4l2m2m = "v4l2m2m",
+	Amlogic = "amlogic",
 }
 
 export type BitratePreset = 

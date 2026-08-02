@@ -3,7 +3,7 @@
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{watch, Mutex, RwLock};
+use tokio::sync::{broadcast, watch, Mutex, RwLock};
 use tracing::{debug, info, warn};
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
@@ -20,6 +20,8 @@ use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
+use webrtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
+use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use webrtc::rtp_transceiver::rtp_codec::{
     RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType,
 };
@@ -38,9 +40,10 @@ use crate::video::codec::h264_bitstream;
 use crate::video::types::{
     BitratePreset, EncodedVideoFrame, PixelFormat, Resolution, VideoEncoderType,
 };
-use std::sync::atomic::AtomicBool;
 
 const MIME_TYPE_H265: &str = "video/H265";
+const KEYFRAME_RETRY_LIMIT: u8 = 3;
+const KEYFRAME_RETRY_BASE_DELAY: Duration = Duration::from_secs(1);
 
 fn is_allowed_ice_ip(ip: IpAddr) -> bool {
     match ip {
@@ -110,9 +113,9 @@ pub struct UniversalSession {
     state_rx: watch::Receiver<ConnectionState>,
     ice_candidates: Arc<Mutex<Vec<IceCandidate>>>,
     hid_controller: Option<Arc<HidController>>,
+    keyframe_feedback: broadcast::Sender<()>,
     video_receiver_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     audio_receiver_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    fps: u32,
 }
 
 impl UniversalSession {
@@ -277,9 +280,44 @@ impl UniversalSession {
 
         let pc = Arc::new(pc);
 
-        pc.add_track(video_track.as_track_local())
+        let video_sender = pc
+            .add_track(video_track.as_track_local())
             .await
             .map_err(|e| AppError::VideoError(format!("Failed to add video track: {}", e)))?;
+
+        // RTCP feedback is advertised in SDP, but it only reaches the
+        // application while the sender is actively drained. Forward PLI/FIR
+        // to the shared encoder so a client that missed an IDR can recover.
+        let (keyframe_feedback, _) = broadcast::channel(8);
+        let keyframe_feedback_tx = keyframe_feedback.clone();
+        let rtcp_session_id = session_id.clone();
+        tokio::spawn(async move {
+            loop {
+                let (packets, _) = match video_sender.read_rtcp().await {
+                    Ok(value) => value,
+                    Err(error) => {
+                        debug!(
+                            "RTCP reader stopped for session {}: {}",
+                            rtcp_session_id, error
+                        );
+                        break;
+                    }
+                };
+                if packets.iter().any(|packet| {
+                    packet
+                        .as_any()
+                        .downcast_ref::<PictureLossIndication>()
+                        .is_some()
+                        || packet.as_any().downcast_ref::<FullIntraRequest>().is_some()
+                }) {
+                    info!(
+                        "RTCP PLI/FIR requested a keyframe for session {}",
+                        rtcp_session_id
+                    );
+                    let _ = keyframe_feedback_tx.send(());
+                }
+            }
+        });
 
         info!(
             "{} video track added to peer connection (session {})",
@@ -309,9 +347,9 @@ impl UniversalSession {
             state_rx,
             ice_candidates: Arc::new(Mutex::new(vec![])),
             hid_controller: None,
+            keyframe_feedback,
             video_receiver_handle: Mutex::new(None),
             audio_receiver_handle: Mutex::new(None),
-            fps: config.fps,
         };
 
         session.setup_event_handlers().await;
@@ -503,9 +541,8 @@ impl UniversalSession {
         let video_track = self.video_track.clone();
         let mut state_rx = self.state_rx.clone();
         let session_id = self.session_id.clone();
-        let _fps = self.fps;
         let expected_codec = self.codec;
-        let send_in_flight = Arc::new(AtomicBool::new(false));
+        let mut keyframe_feedback = self.keyframe_feedback.subscribe();
 
         let handle = tokio::spawn(async move {
             info!(
@@ -538,7 +575,8 @@ impl UniversalSession {
             request_keyframe();
             let mut waiting_for_keyframe = true;
             let mut last_sequence: Option<u64> = None;
-            let mut last_keyframe_request = Instant::now() - Duration::from_secs(1);
+            let mut keyframe_requests = 1u8;
+            let mut next_keyframe_retry = Instant::now() + KEYFRAME_RETRY_BASE_DELAY;
 
             let mut frames_sent: u64 = 0;
 
@@ -557,6 +595,16 @@ impl UniversalSession {
                         }
                     }
 
+                    feedback = keyframe_feedback.recv() => {
+                        if feedback.is_ok() {
+                            request_keyframe();
+                            waiting_for_keyframe = true;
+                            keyframe_requests = 1;
+                            next_keyframe_retry =
+                                Instant::now() + KEYFRAME_RETRY_BASE_DELAY;
+                        }
+                    }
+
                     result = frame_rx.recv() => {
                         let encoded_frame = match result {
                             Some(frame) => frame,
@@ -572,17 +620,6 @@ impl UniversalSession {
                             continue;
                         }
 
-                        if expected_codec == VideoEncoderType::H265
-                                && (encoded_frame.is_keyframe || frames_sent.is_multiple_of(30)) {
-                                debug!(
-                                    "[Session-H265] Received frame #{}: size={}, keyframe={}, seq={}",
-                                    frames_sent,
-                                    encoded_frame.data.len(),
-                                    encoded_frame.is_keyframe,
-                                    encoded_frame.sequence
-                                );
-                            }
-
                         let mut gap_detected = false;
                         if let Some(prev) = last_sequence {
                             if encoded_frame.sequence > prev.saturating_add(1) {
@@ -593,9 +630,12 @@ impl UniversalSession {
                         if waiting_for_keyframe || gap_detected {
                             if encoded_frame.is_keyframe {
                                 waiting_for_keyframe = false;
+                                keyframe_requests = 0;
                             } else {
-                                if gap_detected {
+                                if gap_detected && !waiting_for_keyframe {
                                     waiting_for_keyframe = true;
+                                    keyframe_requests = 0;
+                                    next_keyframe_retry = Instant::now();
                                 }
 
                                 // Some H264 encoders output SPS/PPS in a separate non-keyframe AU
@@ -605,11 +645,19 @@ impl UniversalSession {
                                     && h264_bitstream::has_sps_pps(encoded_frame.data.as_ref());
 
                                 let now = Instant::now();
-                                if now.duration_since(last_keyframe_request)
-                                    >= Duration::from_millis(200)
+                                if keyframe_requests < KEYFRAME_RETRY_LIMIT
+                                    && now >= next_keyframe_retry
                                 {
                                     request_keyframe();
-                                    last_keyframe_request = now;
+                                    keyframe_requests += 1;
+                                    let backoff = 1u32 << (keyframe_requests - 1);
+                                    next_keyframe_retry = now + KEYFRAME_RETRY_BASE_DELAY * backoff;
+                                    if keyframe_requests == KEYFRAME_RETRY_LIMIT {
+                                        warn!(
+                                            "Session {} exhausted keyframe retry budget; waiting for the encoder's next natural keyframe",
+                                            session_id
+                                        );
+                                    }
                                 }
                                 if !forward_h264_parameter_frame {
                                     continue;
@@ -617,16 +665,12 @@ impl UniversalSession {
                             }
                         }
 
-                        let _ = send_in_flight;
-
                         let send_result = video_track
                             .write_frame_bytes(
                                 encoded_frame.data.clone(),
                                 encoded_frame.is_keyframe,
                             )
                             .await;
-                        let _ = send_in_flight;
-
                         match send_result {
                             Ok(()) => {
                                 frames_sent += 1;
