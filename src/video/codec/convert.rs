@@ -558,26 +558,42 @@ impl MjpegToNv12Decoder {
     }
 
     pub fn decode(&mut self, input: &[u8]) -> Result<&[u8]> {
+        self.check_size(input)?;
         let width = self.resolution.width as i32;
         let height = self.resolution.height as i32;
-
-        if !self.size_checked {
-            let (src_width, src_height) = libyuv::mjpg_size(input).map_err(|e| {
-                AppError::VideoError(format!("libyuv MJPEG header read failed: {}", e))
-            })?;
-            if src_width != width || src_height != height {
-                return Err(AppError::VideoError(format!(
-                    "libyuv MJPEG size mismatch: {}x{} (expected {}x{})",
-                    src_width, src_height, width, height
-                )));
-            }
-            self.size_checked = true;
-        }
 
         libyuv::mjpg_to_nv12(input, self.output_buffer.as_bytes_mut(), width, height)
             .map_err(|e| AppError::VideoError(format!("libyuv MJPEG->NV12 failed: {}", e)))?;
 
         Ok(self.output_buffer.as_bytes())
+    }
+
+    /// Decode into caller-owned storage so capture and encoding can run on
+    /// separate threads without copying a full NV12 frame.
+    pub fn decode_into(&mut self, input: &[u8], output: &mut Vec<u8>) -> Result<()> {
+        self.check_size(input)?;
+        let width = self.resolution.width as i32;
+        let height = self.resolution.height as i32;
+        libyuv::mjpg_to_nv12_vec(input, output, width, height)
+            .map_err(|e| AppError::VideoError(format!("libyuv MJPEG->NV12 failed: {}", e)))
+    }
+
+    fn check_size(&mut self, input: &[u8]) -> Result<()> {
+        if self.size_checked {
+            return Ok(());
+        }
+        let width = self.resolution.width as i32;
+        let height = self.resolution.height as i32;
+        let (src_width, src_height) = libyuv::mjpg_size(input)
+            .map_err(|e| AppError::VideoError(format!("libyuv MJPEG header read failed: {}", e)))?;
+        if src_width != width || src_height != height {
+            return Err(AppError::VideoError(format!(
+                "libyuv MJPEG size mismatch: {}x{} (expected {}x{})",
+                src_width, src_height, width, height
+            )));
+        }
+        self.size_checked = true;
+        Ok(())
     }
 }
 
@@ -861,5 +877,35 @@ mod tests {
 
         let result = converter.convert(&yuyv).unwrap();
         assert_eq!(result.len(), 24); // 4*4 + 2*2 + 2*2 = 24 bytes
+    }
+
+    #[test]
+    fn test_mjpeg_decode_into_reuses_output_allocation() {
+        let resolution = Resolution::new(16, 16);
+        let pixels = vec![0x80; 16 * 16 * 3];
+        let image = turbojpeg::Image {
+            pixels: pixels.as_slice(),
+            width: 16,
+            pitch: 16 * 3,
+            height: 16,
+            format: turbojpeg::PixelFormat::RGB,
+        };
+        let mut compressor = turbojpeg::Compressor::new().unwrap();
+        compressor.set_quality(80).unwrap();
+        compressor.set_subsamp(turbojpeg::Subsamp::Sub2x2).unwrap();
+        let jpeg = compressor.compress_to_vec(image).unwrap();
+
+        let output_size = 16 * 16 * 3 / 2;
+        let mut output = Vec::with_capacity(output_size);
+        let allocation = output.as_ptr();
+        let mut decoder = MjpegToNv12Decoder::new(resolution);
+
+        decoder.decode_into(&jpeg, &mut output).unwrap();
+        assert_eq!(output.len(), output_size);
+        assert_eq!(output.as_ptr(), allocation);
+
+        decoder.decode_into(&jpeg, &mut output).unwrap();
+        assert_eq!(output.len(), output_size);
+        assert_eq!(output.as_ptr(), allocation);
     }
 }

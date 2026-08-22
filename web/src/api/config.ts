@@ -115,7 +115,17 @@ export const otgNetworkApi = {
 
   status: () => request<OtgNetworkStatus>('/otg/network/status'),
 
-  interfaces: () => request<NetworkInterfaceInfo[]>('/devices/network'),
+  interfaces: () => request<NetworkInterfaceInfo[]>('/devices/network', {}, { toastOnError: false }),
+}
+
+export const uacApi = {
+  get: () => request<{enabled: boolean; sample_rate: number; channels: number}>('/config/uac'),
+
+  update: (config: {enabled: boolean; sample_rate: number; channels: number}) =>
+    request('/config/uac', {
+      method: 'PATCH',
+      body: JSON.stringify(config),
+    }),
 }
 
 export const otgConfigApi = {

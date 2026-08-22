@@ -10,11 +10,13 @@ import { useConsoleEvents } from '@/composables/useConsoleEvents'
 import { useHidWebSocket } from '@/composables/useHidWebSocket'
 import { useWebRTC } from '@/composables/useWebRTC'
 import { useVideoSession } from '@/composables/useVideoSession'
+import { useVideoScaling } from '@/composables/useVideoScaling'
 import { useComputerUseSocket, type ComputerUseServerMessage } from '@/composables/useComputerUseSocket'
 import { useFeatureVisibility } from '@/composables/useFeatureVisibility'
 import { useTheme } from '@/composables/useTheme'
 import { getUnifiedAudio } from '@/composables/useUnifiedAudio'
-import { streamApi, hidApi, atxApi, atxConfigApi, authApi, computerUseApi } from '@/api'
+import { getMicrophone } from '@/composables/useMicrophone'
+import { streamApi, hidApi, atxApi, atxConfigApi, authApi, computerUseApi, uacApi } from '@/api'
 import type { ComputerUseScreenshot, ComputerUseSession } from '@/api'
 import { CanonicalKey, HidBackend } from '@/types/generated'
 import type { HidKeyboardEvent, HidMouseEvent } from '@/types/hid'
@@ -25,7 +27,7 @@ import { formatFpsValue } from '@/lib/fps'
 import { videoDebugLog } from '@/lib/debugLog'
 import { formatVideoDeviceLabel } from '@/lib/video-device-label'
 import { isAudioDeviceLostStateReason, isAudioStreamDeviceLostPayload } from '@/lib/streamSignal'
-import type { StreamDeviceLostEventData } from '@/types/websocket'
+import type { StreamDeviceLostEventData, StreamStateChangedEventData } from '@/types/websocket'
 import type { VideoMode } from '@/components/VideoConfigPopover.vue'
 
 import StatusCard, { type StatusDetail } from '@/components/StatusCard.vue'
@@ -76,6 +78,11 @@ const { connected: wsConnected, networkError: wsNetworkError } = useWebSocket()
 const hidWs = useHidWebSocket()
 const webrtc = useWebRTC()
 const unifiedAudio = getUnifiedAudio()
+const microphone = getMicrophone()
+const uacEnabled = ref(false)
+const microphoneTransferEnabled = computed(() => (
+  uacEnabled.value && configStore.hid?.backend === HidBackend.Otg
+))
 const videoSession = useVideoSession()
 
 const consoleEvents = useConsoleEvents({
@@ -108,6 +115,7 @@ const videoError = ref(false)
 const videoErrorMessage = ref('')
 const videoRestarting = ref(false)
 const mjpegFrameReceived = ref(false)
+let recoveryEventHandled = false
 
 /** From `stream.state_changed`: ok | no_signal | device_lost | device_busy */
 type StreamSignalState = 'ok' | 'no_signal' | 'device_lost' | 'device_busy'
@@ -115,7 +123,17 @@ const streamSignalState = ref<StreamSignalState>('ok')
 const streamSignalReason = ref<string | null>(null)
 const streamNextRetryMs = ref<number | null>(null)
 
-const videoAspectRatio = ref<string | null>(null)
+const {
+  workspaceRef: videoWorkspaceRef,
+  scaleMode: videoScaleMode,
+  sourceSize: videoSourceSize,
+  sourceSizeAvailable,
+  stageClass: videoStageClass,
+  containerStyle: videoContainerStyle,
+  updateSourceSize: updateVideoSourceSize,
+  clearSourceSize: clearVideoSourceSize,
+  setScaleMode: setVideoScaleMode,
+} = useVideoScaling()
 
 const backendFps = ref(0)
 
@@ -302,13 +320,6 @@ const videoDetails = computed<StatusDetail[]>(() => {
     { label: t('statusCard.fpsActual'), value: actualFpsValue, status: actualStatus },
   ]
 
-  if (videoMode.value === 'mjpeg' && !paused && receivedFps > 0 && receivedFps < (stream.targetFps ?? 0)) {
-    details.push({
-      label: '',
-      value: t('statusCard.fpsStaticHint'),
-    })
-  }
-
   return details
 })
 
@@ -468,14 +479,6 @@ const hidDetails = computed<StatusDetail[]>(() => {
   return details
 })
 
-const audioStatus = computed<'connected' | 'connecting' | 'disconnected' | 'error'>(() => {
-  const audio = systemStore.audio
-  if (!audio?.available) return 'disconnected'
-  if (audio.error) return 'error'
-  if (audio.streaming) return 'connected'
-  return 'disconnected'
-})
-
 function translateAudioQuality(quality: string | undefined): string {
   if (!quality) return t('common.unknown')
   const qualityLower = quality.toLowerCase()
@@ -485,26 +488,81 @@ function translateAudioQuality(quality: string | undefined): string {
   return quality
 }
 
+const microphoneTransferStatus = computed<{
+  text: string
+  card: 'connected' | 'connecting' | 'disconnected' | 'error'
+  detail?: StatusDetail['status']
+}>(() => {
+  switch (microphone.state.value) {
+    case 'starting':
+      return { text: t('statusCard.transferStarting'), card: 'connecting', detail: 'warning' }
+    case 'streaming':
+      if (microphone.targetState.value === 'active') {
+        return { text: t('statusCard.transferActive'), card: 'connected', detail: 'ok' }
+      }
+      if (microphone.targetState.value === 'stalled') {
+        return { text: t('statusCard.transferStalled'), card: 'connecting', detail: 'warning' }
+      }
+      return { text: t('statusCard.transferWaiting'), card: 'connecting', detail: 'warning' }
+    case 'stopping':
+      return { text: t('statusCard.transferStopping'), card: 'connecting', detail: 'warning' }
+    case 'error':
+      return { text: t('statusCard.transferError'), card: 'error', detail: 'error' }
+    case 'idle':
+    default:
+      return { text: t('statusCard.transferIdle'), card: 'disconnected' }
+  }
+})
+
+const audioStatus = computed<'connected' | 'connecting' | 'disconnected' | 'error'>(() => {
+  const transfer = microphoneTransferEnabled.value ? microphoneTransferStatus.value : null
+  if (systemStore.audio?.error || transfer?.card === 'error') return 'error'
+  if (transfer?.card === 'connecting') return 'connecting'
+  if (systemStore.audio?.streaming || transfer?.card === 'connected') return 'connected'
+  return 'disconnected'
+})
+
 const audioQuickInfo = computed(() => {
   const audio = systemStore.audio
-  if (!audio?.available) return ''
-  if (audio.streaming) return translateAudioQuality(audio.quality)
-  return t('statusCard.off')
+  const playback = audio?.streaming
+    ? t('statusCard.playbackActive')
+    : t('statusCard.playbackStopped')
+  return microphoneTransferEnabled.value
+    ? `${playback} · ${microphoneTransferStatus.value.text}`
+    : playback
 })
 
 const audioErrorMessage = computed(() => {
-  return systemStore.audio?.error || ''
+  if (systemStore.audio?.error) return systemStore.audio.error
+  if (!microphoneTransferEnabled.value) return ''
+  const code = microphone.errorCode.value
+  if (microphone.state.value === 'error' && code) {
+    return t(`actionbar.micError.${code}`)
+  }
+  return ''
 })
 
 const audioDetails = computed<StatusDetail[]>(() => {
   const audio = systemStore.audio
-  if (!audio) return []
-
-  return [
-    { label: t('statusCard.device'), value: audio.device || t('statusCard.defaultDevice') },
-    { label: t('statusCard.quality'), value: translateAudioQuality(audio.quality) },
-    { label: t('statusCard.streaming'), value: audio.streaming ? t('common.yes') : t('common.no'), status: audio.streaming ? 'ok' : undefined },
+  const details: StatusDetail[] = [
+    {
+      label: t('statusCard.audioPlayback'),
+      value: audio?.streaming ? t('statusCard.playbackActive') : t('statusCard.playbackStopped'),
+      status: audio?.error ? 'error' : audio?.streaming ? 'ok' : undefined,
+    },
   ]
+  if (microphoneTransferEnabled.value) {
+    details.push({
+      label: t('statusCard.audioTransfer'),
+      value: microphoneTransferStatus.value.text,
+      status: microphoneTransferStatus.value.detail,
+    })
+  }
+  details.push(
+    { label: t('statusCard.device'), value: audio?.device || t('statusCard.defaultDevice') },
+    { label: t('statusCard.quality'), value: translateAudioQuality(audio?.quality) },
+  )
+  return details
 })
 
 const msdStatus = computed<'connected' | 'connecting' | 'disconnected' | 'error'>(() => {
@@ -519,7 +577,7 @@ const msdQuickInfo = computed(() => {
   const msd = systemStore.msd
   if (!msd?.available) return ''
   if (msd.mountedCount === 0) return t('statusCard.msdStandby')
-  return `${msd.diskMode === 'single' ? t('msd.singleDiskMode') : t('msd.multiDiskMode')} · ${t('msd.mediaCount', { count: msd.mountedCount, capacity: msd.slotCapacity })}`
+  return msd.diskMode === 'single' ? t('msd.singleDiskMode') : t('msd.multiDiskMode')
 })
 
 const msdErrorMessage = computed(() => {
@@ -551,18 +609,6 @@ const msdDetails = computed<StatusDetail[]>(() => {
     value: msd.diskMode === 'single' ? t('msd.singleDiskMode') : t('msd.multiDiskMode'),
     status: msd.mountedCount > 0 ? 'ok' : undefined
   })
-
-  if (msd.mountedMedia.length > 0) {
-    for (const media of msd.mountedMedia) {
-      details.push({
-        label: media.kind === 'drive' ? t('statusCard.msdDriveMode') : t('statusCard.msdCurrentImage'),
-        value: media.kind === 'drive'
-          ? t('statusCard.msdDriveMode')
-          : `${media.name || media.id || t('statusCard.msdNoImage')} (${media.cdrom ? t('msd.cdrom') : t('msd.flash')})`,
-        status: 'ok'
-      })
-    }
-  }
 
   return details
 })
@@ -657,22 +703,15 @@ const connectProgress = computed<{ current: number; total: number } | null>(() =
   }
 })
 
-const videoContainerStyle = computed(() => {
-  if (!videoAspectRatio.value) {
-    return {
-      width: '100%',
-      height: '100%',
-      maxWidth: '100%',
-      maxHeight: '100%',
-      minHeight: '120px',
-    }
-  }
-  return {
-    aspectRatio: videoAspectRatio.value,
-    maxWidth: '100%',
-    maxHeight: '100%',
-    minHeight: '120px',
-  }
+function handleWebRTCVideoResize() {
+  if (videoMode.value === 'mjpeg') return
+  const video = webrtcVideoRef.value
+  if (!video) return
+  updateVideoSourceSize(video.videoWidth, video.videoHeight)
+}
+
+watch(videoLoading, (loading) => {
+  if (loading) clearVideoSourceSize()
 })
 
 const computerUsePanelVisible = computed(() => computerUseOpen.value && !isFullscreen.value)
@@ -697,6 +736,8 @@ let webrtcConnectTask: Promise<boolean> | null = null
 
 let webrtcRecoveryTimerId: number | null = null
 let webrtcRecoveryAttempts = 0
+let webrtcReconnectTimeout: ReturnType<typeof setTimeout> | null = null
+let webrtcReconnectFailures = 0
 const MAX_WEBRTC_RECOVERY_ATTEMPTS = 8
 const WEBRTC_RECOVERY_BASE_DELAY = 2000
 
@@ -941,6 +982,11 @@ async function waitForWebRTCReadyGate(reason: string, timeoutMs = 3000): Promise
 }
 
 async function connectWebRTCSerial(reason: string): Promise<boolean> {
+  if (videoMode.value === 'mjpeg') {
+    videoDebugLog('Skipping stale WebRTC connect request in MJPEG mode', { reason })
+    return false
+  }
+
   if (webrtcConnectTask) {
     videoDebugLog('Reusing serialized WebRTC connect task', {
       reason,
@@ -958,6 +1004,10 @@ async function connectWebRTCSerial(reason: string): Promise<boolean> {
   })
   webrtcConnectTask = (async () => {
     await waitForWebRTCReadyGate(reason)
+    if (videoMode.value === 'mjpeg') {
+      videoDebugLog('Discarding WebRTC connect after mode changed to MJPEG', { reason })
+      return false
+    }
     return webrtc.connect()
   })()
 
@@ -981,7 +1031,7 @@ function handleVideoLoad() {
     systemStore.setStreamOnline(true)
     const img = videoRef.value
     if (img && img.naturalWidth && img.naturalHeight) {
-      videoAspectRatio.value = `${img.naturalWidth}/${img.naturalHeight}`
+      updateVideoSourceSize(img.naturalWidth, img.naturalHeight)
     }
   }
 
@@ -1143,13 +1193,36 @@ function cancelWebRTCRecovery() {
   webrtcRecoveryAttempts = 0
 }
 
+async function stopWebRTCClientActivity() {
+  cancelWebRTCRecovery()
+  if (webrtcReconnectTimeout) {
+    clearTimeout(webrtcReconnectTimeout)
+    webrtcReconnectTimeout = null
+  }
+  await webrtc.disconnect()
+}
+
 function handleStreamRecovered(_data: { device: string }) {
   videoDebugLog('Stream recovered event', _data)
   cancelWebRTCRecovery()
+  recoveryEventHandled = true
 
   videoError.value = false
   videoErrorMessage.value = ''
-  refreshVideo()
+  if (videoMode.value === 'mjpeg') {
+    refreshVideo()
+  } else if (webrtc.isConnected.value) {
+    void rebindWebRTCVideo().then(() => {
+      videoLoading.value = false
+    })
+  } else if (!webrtc.isConnecting.value) {
+    void connectWebRTCSerial('stream recovered').then(async connected => {
+      if (connected) {
+        await rebindWebRTCVideo()
+        videoLoading.value = false
+      }
+    })
+  }
 }
 
 async function handleAudioStateChanged(data: { streaming: boolean; device: string | null }) {
@@ -1210,6 +1283,15 @@ async function handleStreamConfigApplied(_data: any) {
     webrtcStage: webrtc.connectStage.value,
   })
   consecutiveErrors = 0
+
+  // A source-following recovery emits `stream.recovered` followed by the
+  // actual geometry. The recovered handler already reconnected the current
+  // transport; do not initiate a second mode switch for the bookkeeping event.
+  if (recoveryEventHandled) {
+    recoveryEventHandled = false
+    videoRestarting.value = false
+    return
+  }
 
   gracePeriodTimeoutId = window.setTimeout(() => {
     gracePeriodTimeoutId = null
@@ -1274,7 +1356,7 @@ function handleStreamModeSwitching(data: { transition_id: string; to_mode: strin
   videoSession.onModeSwitching(data)
 }
 
-function handleStreamStateChanged(data: any) {
+function handleStreamStateChanged(data: StreamStateChangedEventData) {
   videoDebugLog('Stream state changed event', {
     data,
     videoMode: videoMode.value,
@@ -1316,8 +1398,27 @@ function handleStreamStateChanged(data: any) {
   } else if (state === 'no_signal' && videoMode.value !== 'mjpeg') {
     cancelWebRTCRecovery()
     videoRestarting.value = false
+    videoLoading.value = false
     videoError.value = false
     videoErrorMessage.value = ''
+    systemStore.setStreamOnline(false)
+    // Remove the stale decoded frame without closing the peer connection.
+    // The live WebRTC subscription is what keeps a source-following capture
+    // pipeline probing indefinitely; disconnecting here would drop the final
+    // subscriber and make recovery impossible without a page refresh.
+    if (webrtcVideoRef.value) {
+      webrtcVideoRef.value.pause()
+      webrtcVideoRef.value.srcObject = null
+    }
+  } else if (state === 'no_signal' && videoMode.value === 'mjpeg') {
+    systemStore.setStreamOnline(false)
+    videoLoading.value = false
+    mjpegFrameReceived.value = false
+    mjpegTimestamp.value = 0
+    if (videoRef.value) {
+      videoRef.value.src = ''
+      videoRef.value.removeAttribute('src')
+    }
   } else if (state === 'device_busy' && videoMode.value !== 'mjpeg') {
     cancelWebRTCRecovery()
     videoRestarting.value = true
@@ -1340,30 +1441,6 @@ function handleStreamStateChanged(data: any) {
     videoError.value = false
     videoErrorMessage.value = ''
     videoRestarting.value = false
-    if (
-      videoMode.value === 'mjpeg'
-      && (previous === 'no_signal' || previous === 'device_lost' || previous === 'device_busy')
-    ) {
-      refreshVideo()
-    } else if (
-      videoMode.value !== 'mjpeg'
-      && (previous === 'no_signal' || previous === 'device_busy' || previous === 'device_lost')
-    ) {
-      if (webrtc.isConnected.value && !webrtc.isConnecting.value) {
-        void rebindWebRTCVideo().then(() => {
-          videoLoading.value = false
-        })
-      } else if (!webrtc.isConnected.value && !webrtc.isConnecting.value) {
-        void connectWebRTCSerial('stream recovered').then(async (ok) => {
-          if (ok) {
-            await rebindWebRTCVideo()
-            videoLoading.value = false
-          } else if (webrtcRecoveryTimerId === null && webrtcRecoveryAttempts === 0) {
-            scheduleWebRTCRecovery()
-          }
-        })
-      }
-    }
   }
 }
 
@@ -1391,8 +1468,8 @@ const signalOverlayInfo = computed(() => {
     case 'no_signal':
       return {
         title: t('console.signal.noSignal.title'),
-        detail: t('console.signal.noSignal.detail'),
-        hint,
+        detail: hint || t('console.signal.noSignal.detail'),
+        hint: '',
         tone: 'info' as const,
       }
     case 'device_lost':
@@ -1673,6 +1750,7 @@ async function rebindWebRTCVideo() {
       } catch {
       }
       await waitForVideoFirstFrame(webrtcVideoRef.value, 2000)
+      handleWebRTCVideoResize()
       clearFrameOverlay()
     }
   }
@@ -1790,6 +1868,7 @@ async function switchToMJPEG() {
   videoError.value = false
   videoErrorMessage.value = ''
   pendingWebRTCReadyGate = false
+  await stopWebRTCClientActivity()
 
   try {
     const modeResp = await streamApi.setMode('mjpeg')
@@ -1803,10 +1882,6 @@ async function switchToMJPEG() {
     }
   } catch (e) {
     console.error('Failed to switch to MJPEG mode:', e)
-  }
-
-  if (webrtc.isConnected.value || webrtc.sessionId.value) {
-    await webrtc.disconnect()
   }
 
   if (webrtcVideoRef.value) {
@@ -1834,6 +1909,7 @@ function syncToServerMode(mode: VideoMode) {
   if (mode !== 'mjpeg') {
     connectWebRTCOnly(mode)
   } else {
+    void stopWebRTCClientActivity()
     refreshVideo()
   }
 }
@@ -1934,14 +2010,9 @@ watch(webrtc.stats, (stats) => {
   if (videoMode.value !== 'mjpeg' && stats.framesPerSecond > 0) {
     backendFps.value = Math.round(stats.framesPerSecond)
     systemStore.setStreamOnline(true)
-    if (stats.frameWidth && stats.frameHeight) {
-      videoAspectRatio.value = `${stats.frameWidth}/${stats.frameHeight}`
-    }
   }
 }, { deep: true })
 
-let webrtcReconnectTimeout: ReturnType<typeof setTimeout> | null = null
-let webrtcReconnectFailures = 0
 watch(() => webrtc.state.value, (newState, oldState) => {
   console.log('[WebRTC] State changed:', oldState, '->', newState)
   videoDebugLog('WebRTC state watcher observed change', {
@@ -2018,9 +2089,9 @@ watch(() => webrtc.state.value, (newState, oldState) => {
 })
 
 async function toggleFullscreen() {
-  if (!videoContainerRef.value) return
+  if (!videoWorkspaceRef.value) return
   if (!document.fullscreenElement) {
-    await videoContainerRef.value.requestFullscreen()
+    await videoWorkspaceRef.value.requestFullscreen()
     isFullscreen.value = true
   } else {
     await document.exitFullscreen()
@@ -2219,10 +2290,8 @@ function getActiveVideoAspectRatio(): number | null {
     }
   }
 
-  if (!videoAspectRatio.value) return null
-  const [width, height] = videoAspectRatio.value.split('/').map(Number)
-  if (!width || !height) return null
-  return width / height
+  const source = videoSourceSize.value
+  return source ? source.width / source.height : null
 }
 
 function getRenderedVideoRect() {
@@ -2274,6 +2343,20 @@ function getAbsoluteMousePosition(e: MouseEvent) {
   }
 }
 
+function getLocalRenderedVideoBounds() {
+  const container = videoContainerRef.value
+  const renderedRect = getRenderedVideoRect()
+  if (!container || !renderedRect) return null
+
+  const containerRect = container.getBoundingClientRect()
+  return {
+    left: renderedRect.left - containerRect.left,
+    top: renderedRect.top - containerRect.top,
+    right: renderedRect.left - containerRect.left + renderedRect.width,
+    bottom: renderedRect.top - containerRect.top + renderedRect.height,
+  }
+}
+
 function updateLocalCrosshairFromEvent(e: MouseEvent) {
   if (!cursorVisible.value) {
     localCrosshairPos.value = null
@@ -2283,7 +2366,8 @@ function updateLocalCrosshairFromEvent(e: MouseEvent) {
   if (!container) return
 
   const rect = container.getBoundingClientRect()
-  if (rect.width <= 0 || rect.height <= 0) return
+  const bounds = getLocalRenderedVideoBounds()
+  if (rect.width <= 0 || rect.height <= 0 || !bounds) return
 
   if (mouseMode.value === 'relative' && isPointerLocked.value) {
     updateLocalCrosshairByDelta(e.movementX, e.movementY)
@@ -2291,8 +2375,8 @@ function updateLocalCrosshairFromEvent(e: MouseEvent) {
   }
 
   localCrosshairPos.value = {
-    x: Math.max(0, Math.min(rect.width, e.clientX - rect.left)),
-    y: Math.max(0, Math.min(rect.height, e.clientY - rect.top)),
+    x: Math.max(bounds.left, Math.min(bounds.right, e.clientX - rect.left)),
+    y: Math.max(bounds.top, Math.min(bounds.bottom, e.clientY - rect.top)),
   }
 }
 
@@ -2305,13 +2389,16 @@ function updateLocalCrosshairByDelta(dx: number, dy: number) {
   const container = videoContainerRef.value
   if (!container) return
 
-  const rect = container.getBoundingClientRect()
-  if (rect.width <= 0 || rect.height <= 0) return
+  const bounds = getLocalRenderedVideoBounds()
+  if (!bounds) return
 
-  const current = localCrosshairPos.value ?? { x: rect.width / 2, y: rect.height / 2 }
+  const current = localCrosshairPos.value ?? {
+    x: (bounds.left + bounds.right) / 2,
+    y: (bounds.top + bounds.bottom) / 2,
+  }
   localCrosshairPos.value = {
-    x: Math.max(0, Math.min(rect.width, current.x + dx)),
-    y: Math.max(0, Math.min(rect.height, current.y + dy)),
+    x: Math.max(bounds.left, Math.min(bounds.right, current.x + dx)),
+    y: Math.max(bounds.top, Math.min(bounds.bottom, current.y + dy)),
   }
 }
 
@@ -2787,9 +2874,12 @@ function handlePointerLockChange() {
   if (isPointerLocked.value) {
     mousePosition.value = { x: 0, y: 0 }
     if (cursorVisible.value && container) {
-      const r = container.getBoundingClientRect()
-      if (r.width > 0 && r.height > 0) {
-        localCrosshairPos.value = { x: r.width / 2, y: r.height / 2 }
+      const bounds = getLocalRenderedVideoBounds()
+      if (bounds) {
+        localCrosshairPos.value = {
+          x: (bounds.left + bounds.right) / 2,
+          y: (bounds.top + bounds.bottom) / 2,
+        }
       }
     }
   }
@@ -2924,6 +3014,7 @@ async function activateConsoleView() {
 
 function deactivateConsoleView() {
   isConsoleActive.value = false
+  void microphone.stop()
   handleBlur()
   exitPointerLock()
   unregisterInteractionListeners()
@@ -2961,7 +3052,22 @@ function handleToggleMouseMode() {
   }
 }
 
+async function refreshUacAvailability() {
+  try {
+    const uacConfig = await uacApi.get()
+    uacEnabled.value = uacConfig.enabled
+  } catch {
+    uacEnabled.value = false
+  }
+}
+
+watch(microphoneTransferEnabled, enabled => {
+  if (!enabled) void microphone.stop()
+})
+
 onMounted(async () => {
+  await refreshUacAvailability()
+
   consoleEvents.subscribe()
 
   watch([wsConnected, wsNetworkError], ([connected, netError], [_prevConnected, prevNetError]) => {
@@ -2977,6 +3083,10 @@ onMounted(async () => {
   }, { immediate: true })
 
   await systemStore.startStream().catch(() => {})
+  const initialStreamStatus = await streamApi.status().catch(() => null)
+  if (initialStreamStatus) {
+    handleStreamStateChanged(initialStreamStatus)
+  }
   await systemStore.fetchSystemInfo().catch(() => {})
   await systemStore.fetchAllStates()
   await configStore.refreshHid().then(() => {
@@ -3001,6 +3111,7 @@ onMounted(async () => {
 })
 
 onActivated(() => {
+  void refreshUacAvailability()
   void activateConsoleView()
 })
 
@@ -3088,7 +3199,6 @@ onUnmounted(() => {
                 :details="videoDetails"
               />
               <StatusCard
-                v-if="systemStore.audio?.available"
                 :title="t('statusCard.audio')"
                 type="audio"
                 :status="audioStatus"
@@ -3166,7 +3276,11 @@ onUnmounted(() => {
       :show-terminal="showTerminal"
       :show-computer-use="showComputerUse"
       :show-paste-text="showPasteText"
+      :show-mic="microphoneTransferEnabled"
+      :scale-mode="videoScaleMode"
+      :source-size-available="sourceSizeAvailable"
       @toggle-fullscreen="toggleFullscreen"
+      @update:scale-mode="setVideoScaleMode"
       @toggle-stats="openStatsSheet"
       @toggle-virtual-keyboard="handleToggleVirtualKeyboard"
       @toggle-mouse-mode="handleToggleMouseMode"
@@ -3186,29 +3300,34 @@ onUnmounted(() => {
           :class="{ 'md:pr-1': computerUsePanelVisible }"
         >
         <div
-          ref="videoContainerRef"
-          class="relative bg-black overflow-hidden flex items-center justify-center touch-none"
-          :style="videoContainerStyle"
-          :class="{
-            'cursor-none': true,
-          }"
-          tabindex="0"
-          @mouseleave="handleMouseLeaveVideo"
-          @pointerdown="handleTouchPointerDown"
-          @pointermove="handleTouchPointerMove"
-          @pointerup="handleTouchPointerUp"
-          @pointercancel="handleTouchPointerCancel"
-          @mousemove="handleMouseMove"
-          @mousedown="handleMouseDown"
-          @mouseup="handleMouseUp"
-          @wheel.prevent="handleWheel"
-          @contextmenu="handleContextMenu"
+          ref="videoWorkspaceRef"
+          class="video-workspace relative h-full w-full min-h-[120px] overflow-auto fullscreen:bg-black"
         >
+          <div
+            class="relative grid place-items-center"
+            :class="videoStageClass"
+          >
+            <div
+              ref="videoContainerRef"
+              class="relative flex shrink-0 cursor-none items-center justify-center overflow-hidden bg-black touch-none"
+              :style="videoContainerStyle"
+              tabindex="0"
+              @mouseleave="handleMouseLeaveVideo"
+              @pointerdown="handleTouchPointerDown"
+              @pointermove="handleTouchPointerMove"
+              @pointerup="handleTouchPointerUp"
+              @pointercancel="handleTouchPointerCancel"
+              @mousemove="handleMouseMove"
+              @mousedown="handleMouseDown"
+              @mouseup="handleMouseUp"
+              @wheel.prevent="handleWheel"
+              @contextmenu="handleContextMenu"
+            >
           <img
             v-show="videoMode === 'mjpeg'"
             ref="videoRef"
             :src="mjpegUrl"
-            class="w-full h-full object-contain pointer-events-none select-none"
+            class="size-full object-contain pointer-events-none select-none"
             :alt="t('console.videoAlt')"
             draggable="false"
             @load="handleVideoLoad"
@@ -3217,14 +3336,17 @@ onUnmounted(() => {
           <video
             v-show="videoMode !== 'mjpeg'"
             ref="webrtcVideoRef"
-            class="w-full h-full object-contain"
+            class="size-full object-contain pointer-events-none"
             autoplay
             playsinline
+            @loadedmetadata="handleWebRTCVideoResize"
+            @loadeddata="handleWebRTCVideoResize"
+            @resize="handleWebRTCVideoResize"
           />
           <img
             v-if="frameOverlayUrl"
             :src="frameOverlayUrl"
-            class="absolute inset-0 w-full h-full object-contain pointer-events-none"
+            class="absolute inset-0 size-full object-contain pointer-events-none"
             alt=""
           />
           <div
@@ -3280,7 +3402,7 @@ onUnmounted(() => {
           </div>
           <Transition name="fade">
             <div
-              v-if="videoLoading"
+              v-if="videoLoading && !showSignalOverlay && !videoError"
               class="absolute inset-0 flex flex-col items-center justify-center bg-black/70 backdrop-blur-sm transition-opacity duration-300"
             >
               <div class="absolute inset-0 overflow-hidden pointer-events-none">
@@ -3325,7 +3447,7 @@ onUnmounted(() => {
           </Transition>
           <Transition name="fade">
             <div
-              v-if="showSignalOverlay && !videoLoading && !videoError"
+              v-if="showSignalOverlay && !videoError"
               class="absolute inset-0 flex flex-col items-center justify-center gap-3 p-4 transition-opacity duration-300 pointer-events-none"
               :class="{
                 'bg-black/80 backdrop-blur-sm': signalOverlayInfo.tone === 'error',
@@ -3379,6 +3501,8 @@ onUnmounted(() => {
               </div>
             </div>
           </Transition>
+            </div>
+          </div>
         </div>
         </div>
         <ComputerUseSheet
@@ -3483,5 +3607,10 @@ onUnmounted(() => {
 .fade-enter-from,
 .fade-leave-to {
   opacity: 0;
+}
+
+.video-workspace:fullscreen {
+  width: 100vw;
+  height: 100vh;
 }
 </style>

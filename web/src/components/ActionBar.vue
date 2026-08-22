@@ -3,6 +3,7 @@ import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { useSystemStore } from '@/stores/system'
+import type { VideoScaleMode } from '@/composables/useVideoScaling'
 import { Button } from '@/components/ui/button'
 import { ButtonGroup } from '@/components/ui/button-group'
 import {
@@ -32,9 +33,7 @@ import {
 import {
   ClipboardPaste,
   HardDrive,
-  Keyboard,
   Settings,
-  Maximize,
   Power,
   BarChart3,
   Terminal,
@@ -50,6 +49,7 @@ import AudioConfigPopover from '@/components/AudioConfigPopover.vue'
 import MsdDialog from '@/components/MsdDialog.vue'
 import MiHomeDialog from '@/components/MiHomeDialog.vue'
 import { useMiHome } from '@/composables/useMiHome'
+import VideoDisplayControls from '@/components/VideoDisplayControls.vue'
 
 const { t, locale } = useI18n()
 const router = useRouter()
@@ -74,12 +74,18 @@ const props = defineProps<{
   showTerminal?: boolean
   showComputerUse?: boolean
   showPasteText?: boolean
+  showMic?: boolean
+  scaleMode?: VideoScaleMode
+  sourceSizeAvailable?: boolean
 }>()
 const showStats = computed(() => (props.videoMode ?? 'mjpeg') !== 'mjpeg')
 const showPasteText = computed(() => props.showPasteText !== false)
+const showMic = computed(() => props.showMic === true)
+
 
 const emit = defineEmits<{
   (e: 'toggleFullscreen'): void
+  (e: 'update:scaleMode', mode: VideoScaleMode): void
   (e: 'toggleStats'): void
   (e: 'toggleVirtualKeyboard'): void
   (e: 'toggleMouseMode'): void
@@ -141,7 +147,8 @@ const openMobileMihome = () => openFromOverflow(() => {
 const barRef = ref<HTMLElement | null>(null)
 const measureRef = ref<HTMLElement | null>(null)
 const barWidth = ref(0)
-let resizeObserver: ResizeObserver | null = null
+const alwaysRightWidth = ref(152)
+let layoutResizeObserver: ResizeObserver | null = null
 
 type CollapsibleItem =
   | 'video' | 'audio' | 'hid'
@@ -169,16 +176,18 @@ const ITEM_SPECS: ItemSpec[] = [
 const measuredWidths = ref<Map<CollapsibleItem, { icon: number; label: number }>>(new Map())
 const measurementReady = ref(false)
 
-const measureButtonWidths = async () => {
+const measureLayout = async () => {
   await nextTick()
-  if (!measureRef.value) return
+  const bar = barRef.value
+  const measureContainer = measureRef.value
+  if (!bar || !measureContainer) return
+
+  barWidth.value = bar.clientWidth
 
   const newWidths = new Map<CollapsibleItem, { icon: number; label: number }>()
-  
   for (const spec of ITEM_SPECS) {
-    const iconEl = measureRef.value.querySelector(`[data-measure="${spec.id}-icon"]`) as HTMLElement
-    const labelEl = measureRef.value.querySelector(`[data-measure="${spec.id}-label"]`) as HTMLElement
-    
+    const iconEl = measureContainer.querySelector(`[data-measure="${spec.id}-icon"]`) as HTMLElement
+    const labelEl = measureContainer.querySelector(`[data-measure="${spec.id}-label"]`) as HTMLElement
     if (iconEl && labelEl) {
       newWidths.set(spec.id, {
         icon: Math.ceil(iconEl.offsetWidth) + 8,
@@ -186,34 +195,51 @@ const measureButtonWidths = async () => {
       })
     }
   }
-  
   measuredWidths.value = newWidths
+
+  const elements = Array.from(bar.querySelectorAll('[data-fixed-action]')) as HTMLElement[]
+  const width = elements.reduce((sum, element) => {
+    const style = window.getComputedStyle(element)
+    return sum
+      + element.getBoundingClientRect().width
+      + Number.parseFloat(style.marginLeft || '0')
+      + Number.parseFloat(style.marginRight || '0')
+  }, 0)
+  if (width > 0) alwaysRightWidth.value = Math.ceil(width)
+
   measurementReady.value = true
 }
 
+const observeLayout = async () => {
+  await measureLayout()
+  layoutResizeObserver?.disconnect()
+  layoutResizeObserver = new ResizeObserver(() => {
+    void measureLayout()
+  })
+  if (barRef.value) layoutResizeObserver.observe(barRef.value)
+  barRef.value?.querySelectorAll('[data-fixed-action]').forEach((element) => {
+    layoutResizeObserver?.observe(element)
+  })
+}
+
 onMounted(() => {
-  if (barRef.value) {
-    resizeObserver = new ResizeObserver((entries) => {
-      const entry = entries[0]
-      if (entry) barWidth.value = entry.contentRect.width
-    })
-    resizeObserver.observe(barRef.value)
-    barWidth.value = barRef.value.clientWidth
-  }
-  
-  measureButtonWidths()
-  
+  void observeLayout()
+
   // Load MiHome config to check if feature is enabled
   loadConfig().catch(() => {})
 })
 
-onUnmounted(() => { 
-  resizeObserver?.disconnect() 
+onUnmounted(() => {
+  layoutResizeObserver?.disconnect()
 })
 
 watch(locale, () => {
   measurementReady.value = false
-  measureButtonWidths()
+  void measureLayout()
+})
+
+watch(() => props.showComputerUse, () => {
+  void observeLayout()
 })
 
 watch(showAtx, (visible) => {
@@ -230,7 +256,7 @@ watch(showPasteText, (visible) => {
   }
 })
 
-const RIGHT_FIXED_PX = 120
+const OVERFLOW_BUTTON_BUDGET_PX = 36
 
 const collapsibleItems = computed(() => {
   const items = ITEM_SPECS.slice(3).filter(item => {
@@ -250,7 +276,7 @@ const visibleSet = computed(() => {
     return new Map<CollapsibleItem, 'icon' | 'label'>()
   }
 
-  const available = barWidth.value - RIGHT_FIXED_PX
+  const available = barWidth.value - alwaysRightWidth.value - OVERFLOW_BUTTON_BUDGET_PX
   
   let used = 0
   if (barRef.value) {
@@ -293,6 +319,7 @@ const hasLeftOverflow = computed(() => {
 const hasRightOverflow = computed(() => {
   return collapsibleItems.value.some(i => i.side === 'right' && !visibleSet.value.has(i.id))
 })
+
 </script>
 
 <template>
@@ -308,7 +335,10 @@ const hasRightOverflow = computed(() => {
         />
 
         <!-- Audio Config - Always visible -->
-        <AudioConfigPopover v-model:open="audioPopoverOpen" />
+        <AudioConfigPopover
+          v-model:open="audioPopoverOpen"
+          :microphone-enabled="showMic"
+        />
 
         <!-- HID Config - Always visible -->
         <HidConfigPopover
@@ -380,14 +410,23 @@ const hasRightOverflow = computed(() => {
               </Button>
             </PopoverTrigger>
             <PopoverContent class="w-[min(400px,90vw)] p-0" align="start">
-              <PasteModal @close="pasteOpen = false" />
+              <PasteModal v-if="pasteOpen" @close="pasteOpen = false" />
             </PopoverContent>
           </Popover>
         </div>
+
       </ButtonGroup>
 
       <!-- Right side buttons -->
       <ButtonGroup class="shrink-0 ml-1 sm:ml-2">
+        <VideoDisplayControls
+          :scale-mode="props.scaleMode"
+          :source-size-available="props.sourceSizeAvailable"
+          @toggle-fullscreen="emit('toggleFullscreen')"
+          @update:scale-mode="emit('update:scaleMode', $event)"
+          @toggle-virtual-keyboard="emit('toggleVirtualKeyboard')"
+        />
+
         <!-- Connection Stats - Adaptive -->
         <div v-if="isVisible('stats')">
           <TooltipProvider>
@@ -433,6 +472,7 @@ const hasRightOverflow = computed(() => {
           <Tooltip>
             <TooltipTrigger as-child>
               <Button
+                data-fixed-action
                 variant="ghost"
                 size="sm"
                 class="size-8 sm:w-auto p-0 sm:px-2 sm:gap-1.5 text-xs"
@@ -464,52 +504,6 @@ const hasRightOverflow = computed(() => {
             </Tooltip>
           </TooltipProvider>
         </div>
-
-        <div
-          v-if="isVisible('settings')"
-          aria-hidden="true"
-          class="mr-4 h-5 w-px shrink-0 -translate-x-px self-center bg-border"
-        />
-
-        <!-- Virtual Keyboard - Always visible -->
-        <TooltipProvider>
-          <Tooltip>
-            <TooltipTrigger as-child>
-              <Button
-                variant="ghost"
-                size="sm"
-                class="size-8 sm:w-auto p-0 sm:px-2 sm:gap-1.5 text-xs"
-                @click="emit('toggleVirtualKeyboard')"
-              >
-                <Keyboard class="size-3.5 sm:size-4" />
-                <span class="hidden xl:inline">{{ t('actionbar.keyboard') }}</span>
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>
-              <p>{{ t('actionbar.keyboardTip') }}</p>
-            </TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
-
-        <!-- Fullscreen - Always visible -->
-        <TooltipProvider>
-          <Tooltip>
-            <TooltipTrigger as-child>
-              <Button
-                variant="ghost"
-                size="sm"
-                class="size-8 sm:w-auto p-0 sm:px-2 sm:gap-1.5 text-xs"
-                @click="emit('toggleFullscreen')"
-              >
-                <Maximize class="size-3.5 sm:size-4" />
-                <span class="hidden xl:inline">{{ t('actionbar.fullscreen') }}</span>
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>
-              <p>{{ t('actionbar.fullscreenTip') }}</p>
-            </TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
 
         <!-- Overflow Menu - Only show if there are overflowed items -->
         <DropdownMenu v-if="hasOverflow" v-model:open="overflowMenuOpen">
@@ -608,7 +602,7 @@ const hasRightOverflow = computed(() => {
       <SheetHeader class="mb-2">
         <SheetTitle>{{ t('actionbar.paste') }}</SheetTitle>
       </SheetHeader>
-      <PasteModal @close="mobilePasteOpen = false" />
+      <PasteModal v-if="mobilePasteOpen" @close="mobilePasteOpen = false" />
     </SheetContent>
   </Sheet>
 

@@ -11,7 +11,7 @@ use super::types::{
     DiskMode, DownloadProgress, DownloadStatus, DriveInfo, ImageInfo, MountedMedia,
     MountedMediaKind, MsdState,
 };
-use crate::error::{AppError, Result};
+use crate::error::{AppError, MsdErrorCode, Result};
 use crate::otg::{MsdFunction, MsdLunConfig, OtgService};
 
 pub struct MsdController {
@@ -70,9 +70,11 @@ impl MsdController {
         }
 
         info!("Fetching MSD function from OtgService");
-        let msd_func = self.otg_service.msd_function().await.ok_or_else(|| {
-            AppError::Internal("MSD function is not active in OtgService".to_string())
-        })?;
+        let msd_func = self
+            .otg_service
+            .msd_function()
+            .await
+            .ok_or_else(|| AppError::from(MsdErrorCode::MsdUnavailable))?;
 
         *self.msd_function.write().await = Some(msd_func);
 
@@ -148,7 +150,7 @@ impl MsdController {
         read_only: bool,
         requested_lun: Option<u8>,
     ) -> Result<()> {
-        let _op_guard = self.operation_lock.write().await;
+        let _op_guard = self.try_operation()?;
         let mut state = self.state.write().await;
         let previous_state = state.clone();
 
@@ -159,7 +161,7 @@ impl MsdController {
             self.monitor
                 .report_error(&error_msg, "image_not_found")
                 .await;
-            return Err(AppError::Internal(error_msg));
+            return Err(MsdErrorCode::MsdResourceNotFound.into());
         }
 
         if state
@@ -167,7 +169,7 @@ impl MsdController {
             .iter()
             .any(|media| media.kind == MountedMediaKind::Image && media.id == image.id)
         {
-            return Err(AppError::BadRequest("Image is already mounted".to_string()));
+            return Err(MsdErrorCode::MsdMediaAlreadyMounted.into());
         }
 
         let lun = Self::select_lun(&state, requested_lun)?;
@@ -195,19 +197,17 @@ impl MsdController {
     }
 
     pub async fn mount_drive(&self) -> Result<()> {
-        let _op_guard = self.operation_lock.write().await;
+        let _op_guard = self.try_operation()?;
         let mut state = self.state.write().await;
         let previous_state = state.clone();
 
         self.assert_available(&state).await?;
 
         if !self.drive_path.exists() {
-            let err =
-                AppError::Internal("Virtual drive not initialized. Call init first.".to_string());
             self.monitor
                 .report_error("Virtual drive not initialized", "drive_not_found")
                 .await;
-            return Err(err);
+            return Err(MsdErrorCode::MsdDriveNotInitialized.into());
         }
 
         let drive_info = state.drive_info.clone().or_else(|| {
@@ -230,15 +230,13 @@ impl MsdController {
             .iter()
             .any(|media| media.kind == MountedMediaKind::Drive)
         {
-            return Err(AppError::BadRequest(
-                "Virtual drive is already mounted".to_string(),
-            ));
+            return Err(MsdErrorCode::MsdMediaAlreadyMounted.into());
         }
 
-        let drive_info = drive_info
-            .ok_or_else(|| AppError::Internal("Virtual drive info is unavailable".to_string()))?;
+        let drive_info =
+            drive_info.ok_or_else(|| AppError::from(MsdErrorCode::MsdDriveNotInitialized))?;
         let lun = Self::lowest_free_lun(&state)
-            .ok_or_else(|| AppError::BadRequest("Media slots are full".to_string()))?;
+            .ok_or_else(|| AppError::from(MsdErrorCode::MsdMediaSlotsFull))?;
 
         let media = MountedMedia::drive(lun, &drive_info);
         if let Err(e) = self.configure_media(&media).await {
@@ -265,7 +263,7 @@ impl MsdController {
             self.monitor
                 .report_error("MSD not available", "not_available")
                 .await;
-            return Err(AppError::Internal("MSD not available".to_string()));
+            return Err(MsdErrorCode::MsdUnavailable.into());
         }
         Ok(())
     }
@@ -286,20 +284,14 @@ impl MsdController {
     fn select_lun(state: &MsdState, requested_lun: Option<u8>) -> Result<u8> {
         let Some(lun) = requested_lun else {
             return Self::lowest_free_lun(state)
-                .ok_or_else(|| AppError::BadRequest("Media slots are full".to_string()));
+                .ok_or_else(|| AppError::from(MsdErrorCode::MsdMediaSlotsFull));
         };
 
         if lun >= state.disk_mode.capacity() {
-            return Err(AppError::BadRequest(format!(
-                "Media slot {} is outside the current disk mode capacity",
-                lun + 1
-            )));
+            return Err(MsdErrorCode::MsdInvalidRequest.into());
         }
         if state.mounted_media.iter().any(|media| media.lun == lun) {
-            return Err(AppError::BadRequest(format!(
-                "Media slot {} is already occupied",
-                lun + 1
-            )));
+            return Err(MsdErrorCode::MsdMediaSlotsFull.into());
         }
         Ok(lun)
     }
@@ -310,7 +302,7 @@ impl MsdController {
     }
 
     pub async fn set_disk_mode(&self, disk_mode: DiskMode) -> Result<bool> {
-        let _op_guard = self.operation_lock.write().await;
+        let _op_guard = self.try_operation()?;
         let previous_state = {
             let mut state = self.state.write().await;
             self.assert_available(&state).await?;
@@ -327,9 +319,10 @@ impl MsdController {
             self.otg_service
                 .set_msd_lun_capacity(disk_mode.capacity())
                 .await?;
-            self.otg_service.msd_function().await.ok_or_else(|| {
-                AppError::Internal("MSD function missing after OTG rebuild".to_string())
-            })
+            self.otg_service
+                .msd_function()
+                .await
+                .ok_or_else(|| AppError::from(MsdErrorCode::MsdOperationFailed))
         }
         .await;
 
@@ -349,7 +342,7 @@ impl MsdController {
                         .report_error(&error_msg, "disk_mode_rollback_failed")
                         .await;
                     self.mark_device_info_dirty().await;
-                    return Err(AppError::Internal(error_msg));
+                    return Err(MsdErrorCode::MsdOperationFailed.into());
                 }
 
                 let mut state = self.state.write().await;
@@ -360,7 +353,7 @@ impl MsdController {
                     .report_error(&error_msg, "disk_mode_switch_failed")
                     .await;
                 self.mark_device_info_dirty().await;
-                return Err(AppError::Internal(error_msg));
+                return Err(MsdErrorCode::MsdOperationFailed.into());
             }
         };
         *self.msd_function.write().await = Some(msd_function);
@@ -397,7 +390,7 @@ impl MsdController {
     where
         F: Fn(&MountedMedia) -> bool,
     {
-        let _op_guard = self.operation_lock.write().await;
+        let _op_guard = self.try_operation()?;
 
         let mut state = self.state.write().await;
         let Some(index) = state.mounted_media.iter().position(predicate) else {
@@ -419,25 +412,22 @@ impl MsdController {
     }
 
     async fn configure_media(&self, media: &MountedMedia) -> Result<()> {
-        let gadget_path = self.active_gadget_path().await?;
-        let msd_hold = self.msd_function.read().await;
-        let Some(ref msd) = *msd_hold else {
-            self.monitor
-                .report_error("MSD function not initialized", "not_initialized")
-                .await;
-            return Err(AppError::Internal(
-                "MSD function not initialized".to_string(),
-            ));
-        };
-        if let Err(e) = msd
-            .configure_lun_async(&gadget_path, media.lun, &Self::media_config(media))
+        if let Err(e) = self
+            .otg_service
+            .configure_msd_lun(media.lun, &Self::media_config(media))
             .await
         {
             let error_msg = format!("Failed to configure LUN {}: {}", media.lun, e);
             self.monitor
                 .report_error(&error_msg, "configfs_error")
                 .await;
-            return Err(e);
+            return Err(match e {
+                AppError::Msd(error) => AppError::Msd(error),
+                error => {
+                    warn!(%error, "Unclassified MSD media configuration failure");
+                    MsdErrorCode::MsdOperationFailed.into()
+                }
+            });
         }
         Ok(())
     }
@@ -447,7 +437,7 @@ impl MsdController {
         let msd_hold = self.msd_function.read().await;
         let msd = msd_hold
             .as_ref()
-            .ok_or_else(|| AppError::Internal("MSD function not initialized".to_string()))?;
+            .ok_or_else(|| AppError::from(MsdErrorCode::MsdUnavailable))?;
         msd.disconnect_lun_async(&gadget_path, lun).await
     }
 
@@ -455,9 +445,11 @@ impl MsdController {
         self.otg_service
             .set_msd_lun_capacity(previous_state.disk_mode.capacity())
             .await?;
-        let msd_function = self.otg_service.msd_function().await.ok_or_else(|| {
-            AppError::Internal("MSD function missing after OTG rollback".to_string())
-        })?;
+        let msd_function = self
+            .otg_service
+            .msd_function()
+            .await
+            .ok_or_else(|| AppError::from(MsdErrorCode::MsdOperationFailed))?;
         *self.msd_function.write().await = Some(msd_function);
         for media in &previous_state.mounted_media {
             self.configure_media(media).await?;
@@ -473,7 +465,7 @@ impl MsdController {
     }
 
     pub async fn disconnect(&self) -> Result<()> {
-        let _op_guard = self.operation_lock.write().await;
+        let _op_guard = self.try_operation()?;
 
         let mut state = self.state.write().await;
         if state.mounted_media.is_empty() {
@@ -488,10 +480,13 @@ impl MsdController {
                 for prior in &disconnected {
                     if let Err(restore_error) = self.configure_media(prior).await {
                         state.available = false;
-                        return Err(AppError::Internal(format!(
-                            "Failed to disconnect LUN {}: {error}; restore failed: {restore_error}",
-                            media.lun
-                        )));
+                        warn!(
+                            lun = media.lun,
+                            disconnect_error = %error,
+                            %restore_error,
+                            "Failed to restore MSD media after disconnect failure"
+                        );
+                        return Err(MsdErrorCode::MsdDisconnectFailed.into());
                     }
                 }
                 return Err(error);
@@ -520,16 +515,14 @@ impl MsdController {
     }
 
     pub async fn delete_image(&self, image_id: &str) -> Result<()> {
-        let _op_guard = self.operation_lock.write().await;
+        let _op_guard = self.try_operation()?;
         let state = self.state.read().await;
         if state
             .mounted_media
             .iter()
             .any(|media| media.kind == MountedMediaKind::Image && media.id == image_id)
         {
-            return Err(AppError::BadRequest(
-                "Cannot delete image while it is mounted".to_string(),
-            ));
+            return Err(MsdErrorCode::MsdMediaInUse.into());
         }
 
         ImageManager::new(self.images_path.clone()).delete(image_id)
@@ -540,6 +533,12 @@ impl MsdController {
         url: String,
         filename: Option<String>,
     ) -> Result<DownloadProgress> {
+        let parsed_url =
+            reqwest::Url::parse(&url).map_err(|_| AppError::from(MsdErrorCode::MsdInvalidUrl))?;
+        if !matches!(parsed_url.scheme(), "http" | "https") {
+            return Err(MsdErrorCode::MsdInvalidUrl.into());
+        }
+
         let download_id = uuid::Uuid::new_v4().to_string();
         let cancel_token = CancellationToken::new();
 
@@ -560,7 +559,7 @@ impl MsdController {
             total_bytes: None,
             progress_pct: None,
             status: DownloadStatus::Started,
-            error: None,
+            error_code: None,
         };
 
         self.publish_event(crate::events::SystemEvent::MsdDownloadProgress {
@@ -571,6 +570,7 @@ impl MsdController {
             total_bytes: None,
             progress_pct: None,
             status: "started".to_string(),
+            error_code: None,
         })
         .await;
 
@@ -600,6 +600,7 @@ impl MsdController {
                         total_bytes: total,
                         progress_pct,
                         status: "in_progress".to_string(),
+                        error_code: None,
                     });
                 }
             };
@@ -624,11 +625,16 @@ impl MsdController {
                             total_bytes: Some(image_info.size),
                             progress_pct: Some(100.0),
                             status: "completed".to_string(),
+                            error_code: None,
                         });
                     }
                 }
                 Err(e) => {
-                    warn!("Download failed: {}", e);
+                    warn!(error = %e, "MSD image download failed");
+                    let code = match e {
+                        AppError::Msd(error) => error.code(),
+                        _ => MsdErrorCode::MsdOperationFailed,
+                    };
                     if let Some(ref bus) = events {
                         bus.publish(crate::events::SystemEvent::MsdDownloadProgress {
                             download_id: download_id_clone,
@@ -637,7 +643,8 @@ impl MsdController {
                             bytes_downloaded: 0,
                             total_bytes: None,
                             progress_pct: None,
-                            status: format!("failed: {}", e),
+                            status: "failed".to_string(),
+                            error_code: Some(code.as_str().to_string()),
                         });
                     }
                 }
@@ -655,10 +662,7 @@ impl MsdController {
             info!("Download cancelled: {}", download_id);
             Ok(())
         } else {
-            Err(AppError::NotFound(format!(
-                "Download not found: {}",
-                download_id
-            )))
+            Err(MsdErrorCode::MsdResourceNotFound.into())
         }
     }
 
@@ -666,7 +670,13 @@ impl MsdController {
         self.otg_service
             .gadget_path()
             .await
-            .ok_or_else(|| AppError::Internal("OTG gadget path is not available".to_string()))
+            .ok_or_else(|| AppError::from(MsdErrorCode::MsdUnavailable))
+    }
+
+    fn try_operation(&self) -> Result<tokio::sync::RwLockWriteGuard<'_, ()>> {
+        self.operation_lock
+            .try_write()
+            .map_err(|_| MsdErrorCode::MsdOperationInProgress.into())
     }
 
     pub async fn shutdown(&self) -> Result<()> {
@@ -710,6 +720,18 @@ mod tests {
         assert!(!state.available);
         assert!(controller.images_path.ends_with("images"));
         assert!(controller.drive_path.ends_with("ventoy.img"));
+    }
+
+    #[tokio::test]
+    async fn concurrent_operations_have_a_stable_error_code() {
+        let temp_dir = TempDir::new().unwrap();
+        let controller = MsdController::new(Arc::new(OtgService::new()), temp_dir.path());
+        let _guard = controller.operation_lock.write().await;
+
+        assert!(matches!(
+            controller.try_operation().unwrap_err(),
+            AppError::Msd(error) if error.code() == MsdErrorCode::MsdOperationInProgress
+        ));
     }
 
     #[tokio::test]
@@ -783,14 +805,14 @@ mod tests {
             .push(MountedMedia::image(3, &image, false, true));
 
         assert_eq!(MsdController::select_lun(&state, Some(5)).unwrap(), 5);
-        assert!(MsdController::select_lun(&state, Some(3))
-            .unwrap_err()
-            .to_string()
-            .contains("already occupied"));
-        assert!(MsdController::select_lun(&state, Some(8))
-            .unwrap_err()
-            .to_string()
-            .contains("outside"));
+        assert!(matches!(
+            MsdController::select_lun(&state, Some(3)).unwrap_err(),
+            AppError::Msd(error) if error.code() == MsdErrorCode::MsdMediaSlotsFull
+        ));
+        assert!(matches!(
+            MsdController::select_lun(&state, Some(8)).unwrap_err(),
+            AppError::Msd(error) if error.code() == MsdErrorCode::MsdInvalidRequest
+        ));
     }
 
     #[test]

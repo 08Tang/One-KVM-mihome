@@ -1,27 +1,25 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { toast } from 'vue-sonner'
+import { Loader2, RefreshCw, Volume2 } from 'lucide-vue-next'
+
+import { audioApi, configApi } from '@/api'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
-import { Separator } from '@/components/ui/separator'
-import { Slider } from '@/components/ui/slider'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import {
   Popover,
   PopoverContent,
   PopoverTrigger,
 } from '@/components/ui/popover'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
-import { Volume2, RefreshCw, Loader2 } from 'lucide-vue-next'
-import { audioApi, configApi } from '@/api'
+import { Separator } from '@/components/ui/separator'
+import { Slider } from '@/components/ui/slider'
+import MicrophoneTransferControls from '@/components/MicrophoneTransferControls.vue'
+import { getMicrophone } from '@/composables/useMicrophone'
+import { getUnifiedAudio } from '@/composables/useUnifiedAudio'
 import { useConfigStore } from '@/stores/config'
 import { useSystemStore } from '@/stores/system'
-import { getUnifiedAudio } from '@/composables/useUnifiedAudio'
 
 interface AudioDevice {
   name: string
@@ -30,18 +28,27 @@ interface AudioDevice {
 
 const props = defineProps<{
   open: boolean
+  microphoneEnabled?: boolean
 }>()
 
 const emit = defineEmits<{
-  (e: 'update:open', value: boolean): void
+  (event: 'update:open', value: boolean): void
 }>()
 
 const { t } = useI18n()
 const configStore = useConfigStore()
 const systemStore = useSystemStore()
 const unifiedAudio = getUnifiedAudio()
+const microphone = getMicrophone()
 
 const localVolume = ref([unifiedAudio.volume.value * 100])
+const devices = ref<AudioDevice[]>([])
+const loadingDevices = ref(false)
+const applying = ref(false)
+const audioEnabled = ref(false)
+const selectedDevice = ref('')
+const selectedQuality = ref<'voice' | 'balanced' | 'high'>('balanced')
+const EMPTY_SELECT_VALUE = '__one-kvm-empty-select-value__'
 
 async function handleVolumeChange(value: number[] | undefined) {
   if (!value || value.length === 0 || value[0] === undefined) return
@@ -51,29 +58,20 @@ async function handleVolumeChange(value: number[] | undefined) {
   localVolume.value = value
 
   if (newVolume > 0 && systemStore.audio?.streaming && !unifiedAudio.connected.value) {
-    console.log('[Audio] User adjusted volume, connecting unified audio')
     try {
       await unifiedAudio.connect()
-    } catch (e) {
-      console.info('[Audio] Connect failed:', e)
+    } catch (error) {
+      console.info('[Audio] Connect failed:', error)
     }
   }
 }
-
-const devices = ref<AudioDevice[]>([])
-const loadingDevices = ref(false)
-const applying = ref(false)
-
-const audioEnabled = ref(false)
-const selectedDevice = ref('')
-const selectedQuality = ref<'voice' | 'balanced' | 'high'>('balanced')
 
 async function loadDevices() {
   loadingDevices.value = true
   try {
     const result = await configApi.listDevices()
     devices.value = result.audio
-  } catch (e) {
+  } catch {
     console.info('[AudioConfig] Failed to load devices')
   } finally {
     loadingDevices.value = false
@@ -102,197 +100,195 @@ async function applyConfig() {
     })
 
     if (audioEnabled.value && selectedDevice.value) {
-      try {
-        if (localVolume.value[0] === 0) {
-          localVolume.value = [100]
-          unifiedAudio.setVolume(1)
-        }
-
-        await audioApi.start()
-      } catch (startError) {
-        console.info('[AudioConfig] Audio start failed:', startError)
+      if (localVolume.value[0] === 0) {
+        localVolume.value = [100]
+        unifiedAudio.setVolume(1)
       }
+
+      await audioApi.start()
     } else if (!audioEnabled.value) {
       localVolume.value = [0]
       unifiedAudio.setVolume(0)
-      try {
-        await audioApi.stop()
-      } catch {
-      }
+      await audioApi.stop()
       unifiedAudio.disconnect()
     }
-  } catch (e) {
-    console.info('[AudioConfig] Failed to apply config:', e)
+
+    toast.success(t('common.success'))
+  } catch (error) {
+    toast.error(t('common.error'), {
+      description: error instanceof Error ? error.message : String(error),
+    })
   } finally {
     applying.value = false
   }
 }
 
-watch(() => props.open, (isOpen) => {
+watch(() => props.open, isOpen => {
   if (!isOpen) return
 
   if (devices.value.length === 0) {
-    loadDevices()
+    void loadDevices()
+  }
+  if (props.microphoneEnabled) {
+    void microphone.refreshInputDevices()
   }
 
   configStore.refreshAudio()
-    .then(() => {
-      initializeFromCurrent()
-    })
-    .catch(() => {
-      initializeFromCurrent()
-    })
+    .then(initializeFromCurrent)
+    .catch(initializeFromCurrent)
+})
+
+onUnmounted(() => {
+  void microphone.stop()
 })
 </script>
 
 <template>
   <Popover :open="open" @update:open="emit('update:open', $event)">
     <PopoverTrigger as-child>
-      <Button variant="ghost" size="sm" class="size-8 sm:w-auto p-0 sm:px-2 sm:gap-1.5 text-xs">
+      <Button
+        variant="ghost"
+        size="sm"
+        class="size-8 p-0 text-xs sm:w-auto sm:gap-1.5 sm:px-2"
+      >
         <Volume2 class="size-3.5 sm:size-4" />
         <span class="hidden sm:inline">{{ t('actionbar.audioConfig') }}</span>
       </Button>
     </PopoverTrigger>
+
     <PopoverContent class="w-[min(320px,92vw)] p-3" align="start">
       <div class="space-y-3">
         <h4 class="text-sm font-medium">{{ t('actionbar.audioConfig') }}</h4>
 
         <Separator />
 
-        <!-- Playback Control (immediate effect) -->
-        <div class="space-y-3">
-          <h5 class="text-xs font-medium text-muted-foreground">
-            {{ t('actionbar.playbackControl') }}
-          </h5>
+        <template v-if="props.microphoneEnabled">
+          <MicrophoneTransferControls />
+          <Separator />
+        </template>
 
-          <!-- Volume -->
+        <!-- Playback volume and capture configuration form one section. -->
+        <div class="space-y-3">
+          <div class="flex items-center justify-between">
+            <h5 class="text-xs font-medium text-muted-foreground">
+              {{ t('actionbar.playbackControl') }}
+            </h5>
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              :disabled="loadingDevices"
+              @click="loadDevices"
+            >
+              <RefreshCw :class="['size-3.5', loadingDevices && 'animate-spin']" />
+            </Button>
+          </div>
+
           <div class="space-y-2">
-            <div class="flex justify-between items-center">
+            <div class="flex items-center justify-between">
               <Label class="text-xs text-muted-foreground">{{ t('actionbar.volume') }}</Label>
-              <span class="text-xs font-mono">{{ Math.round(localVolume[0] ?? 0) }}%</span>
+              <span class="font-mono text-xs">{{ Math.round(localVolume[0] ?? 0) }}%</span>
             </div>
             <div class="flex items-center gap-2">
               <Volume2 class="size-3.5 text-muted-foreground opacity-50" />
               <Slider
                 :model-value="localVolume"
-                @update:model-value="handleVolumeChange"
                 :min="0"
                 :max="100"
                 :step="1"
                 :disabled="!systemStore.audio?.streaming"
                 class="flex-1"
+                @update:model-value="handleVolumeChange"
               />
               <Volume2 class="size-3.5 text-muted-foreground" />
             </div>
           </div>
-        </div>
 
-        <!-- Device Settings (requires apply) -->
-        <Separator />
-
-        <div class="space-y-3">
-            <div class="flex items-center justify-between">
-              <h5 class="text-xs font-medium text-muted-foreground">
-                {{ t('actionbar.audioDeviceSettings') }}
-              </h5>
+          <div class="space-y-2">
+            <Label class="text-xs text-muted-foreground">{{ t('actionbar.audioEnabled') }}</Label>
+            <div class="flex gap-2">
               <Button
-                variant="ghost"
-                size="icon-xs"
-                :disabled="loadingDevices"
-                @click="loadDevices"
+                :variant="audioEnabled ? 'default' : 'outline'"
+                size="sm"
+                class="flex-1 text-xs"
+                @click="audioEnabled = true"
               >
-                <RefreshCw :class="['size-3.5', loadingDevices && 'animate-spin']" />
+                {{ t('common.enabled') }}
+              </Button>
+              <Button
+                :variant="!audioEnabled ? 'default' : 'outline'"
+                size="sm"
+                class="flex-1 text-xs"
+                @click="audioEnabled = false"
+              >
+                {{ t('common.disabled') }}
               </Button>
             </div>
-
-            <!-- Enable Audio -->
-            <div class="space-y-2">
-              <Label class="text-xs text-muted-foreground">{{ t('actionbar.audioEnabled') }}</Label>
-              <div class="flex gap-2">
-                <Button
-                  :variant="audioEnabled ? 'default' : 'outline'"
-                  size="sm"
-                  class="flex-1 h-8 text-xs"
-                  @click="audioEnabled = true"
-                >
-                  {{ t('common.enabled') }}
-                </Button>
-                <Button
-                  :variant="!audioEnabled ? 'default' : 'outline'"
-                  size="sm"
-                  class="flex-1 h-8 text-xs"
-                  @click="audioEnabled = false"
-                >
-                  {{ t('common.disabled') }}
-                </Button>
-              </div>
-            </div>
-
-            <!-- Device Selection -->
-            <div class="space-y-2">
-              <Label class="text-xs text-muted-foreground">{{ t('actionbar.audioDevice') }}</Label>
-              <Select
-                :model-value="selectedDevice"
-                @update:model-value="(v) => selectedDevice = v as string"
-                :disabled="loadingDevices || devices.length === 0"
-              >
-                <SelectTrigger size="sm" class="w-full text-xs">
-                  <SelectValue :placeholder="t('actionbar.selectAudioDevice')" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem
-                    v-for="device in devices"
-                    :key="device.name"
-                    :value="device.name"
-                    class="text-xs"
-                  >
-                    {{ device.description || device.name }}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            <!-- Audio Quality -->
-            <div class="space-y-2">
-              <Label class="text-xs text-muted-foreground">{{ t('actionbar.audioQuality') }}</Label>
-              <div class="flex gap-1">
-                <Button
-                  :variant="selectedQuality === 'voice' ? 'default' : 'outline'"
-                  size="sm"
-                  class="flex-1 h-8 text-xs"
-                  @click="selectedQuality = 'voice'"
-                >
-                  {{ t('actionbar.qualityVoice') }} 32k
-                </Button>
-                <Button
-                  :variant="selectedQuality === 'balanced' ? 'default' : 'outline'"
-                  size="sm"
-                  class="flex-1 h-8 text-xs"
-                  @click="selectedQuality = 'balanced'"
-                >
-                  {{ t('actionbar.qualityBalanced') }} 64k
-                </Button>
-                <Button
-                  :variant="selectedQuality === 'high' ? 'default' : 'outline'"
-                  size="sm"
-                  class="flex-1 h-8 text-xs"
-                  @click="selectedQuality = 'high'"
-                >
-                  {{ t('actionbar.qualityHigh') }} 128k
-                </Button>
-              </div>
-            </div>
-
-            <!-- Apply Button -->
-            <Button
-              class="w-full h-8 text-xs"
-              :disabled="applying"
-              @click="applyConfig"
-            >
-              <Loader2 v-if="applying" class="size-3.5 mr-1.5 animate-spin" />
-              <span>{{ applying ? t('actionbar.applying') : t('common.apply') }}</span>
-            </Button>
           </div>
+
+          <div class="space-y-2">
+            <Label class="text-xs text-muted-foreground">{{ t('actionbar.audioDevice') }}</Label>
+            <Select
+              :model-value="selectedDevice"
+              :disabled="loadingDevices || devices.length === 0"
+              @update:model-value="selectedDevice = $event === EMPTY_SELECT_VALUE ? '' : String($event)"
+            >
+              <SelectTrigger size="sm" class="w-full text-xs">
+                <SelectValue :placeholder="t('actionbar.selectAudioDevice')" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem :value="EMPTY_SELECT_VALUE" class="text-xs">{{ t('actionbar.selectAudioDevice') }}</SelectItem>
+                <SelectItem
+                  v-for="device in devices"
+                  :key="device.name"
+                  :value="device.name"
+                  class="text-xs"
+                >
+                  {{ device.description || device.name }}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div class="space-y-2">
+            <Label class="text-xs text-muted-foreground">{{ t('actionbar.audioQuality') }}</Label>
+            <div class="flex gap-1">
+              <Button
+                :variant="selectedQuality === 'voice' ? 'default' : 'outline'"
+                size="sm"
+                class="flex-1 text-xs"
+                @click="selectedQuality = 'voice'"
+              >
+                {{ t('actionbar.qualityVoice') }} 32k
+              </Button>
+              <Button
+                :variant="selectedQuality === 'balanced' ? 'default' : 'outline'"
+                size="sm"
+                class="flex-1 text-xs"
+                @click="selectedQuality = 'balanced'"
+              >
+                {{ t('actionbar.qualityBalanced') }} 64k
+              </Button>
+              <Button
+                :variant="selectedQuality === 'high' ? 'default' : 'outline'"
+                size="sm"
+                class="flex-1 text-xs"
+                @click="selectedQuality = 'high'"
+              >
+                {{ t('actionbar.qualityHigh') }} 128k
+              </Button>
+            </div>
+          </div>
+
+          <Button
+            size="sm"
+            class="w-full text-xs"
+            :disabled="applying"
+            @click="applyConfig"
+          >
+            <Loader2 v-if="applying" class="size-3.5 animate-spin" />
+            {{ applying ? t('actionbar.applying') : t('common.apply') }}
+          </Button>
+        </div>
       </div>
     </PopoverContent>
   </Popover>

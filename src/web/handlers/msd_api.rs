@@ -3,11 +3,13 @@ use super::*;
 
 use crate::msd::{
     DiskModeRequest, DownloadProgress, DriveFile, DriveInfo, DriveInitRequest,
-    ImageDownloadRequest, ImageInfo, ImageManager, ImageMountRequest, MsdState, MsdStateResponse,
-    VentoyDrive, MIN_DRIVE_SIZE_MB,
+    ImageDownloadRequest, ImageInfo, ImageManager, ImageMountRequest, MsdErrorCode, MsdState,
+    MsdStateResponse, VentoyDrive, MIN_DRIVE_SIZE_MB,
 };
 #[cfg(unix)]
 use axum::body::Body;
+#[cfg(unix)]
+use axum::extract::{multipart::MultipartRejection, rejection::JsonRejection};
 #[cfg(unix)]
 use axum::extract::{Multipart, Path as AxumPath};
 #[cfg(unix)]
@@ -29,10 +31,7 @@ async fn assert_drive_not_connected(state: &Arc<AppState>) -> Result<()> {
     let msd_guard = state.msd.read().await;
     if let Some(controller) = msd_guard.as_ref() {
         if controller.is_drive_connected().await {
-            return Err(AppError::BadRequest(
-                "Virtual drive is connected to the USB host; disconnect it before modifying files"
-                    .to_string(),
-            ));
+            return Err(MsdErrorCode::MsdDriveConnected.into());
         }
     }
     Ok(())
@@ -42,35 +41,61 @@ async fn assert_drive_not_connected(state: &Arc<AppState>) -> Result<()> {
 fn validate_drive_init_size(size_mb: u32, available_bytes: u64) -> Result<()> {
     let requested_bytes = size_mb as u64 * MIB;
     if size_mb < MIN_DRIVE_SIZE_MB {
-        return Err(AppError::BadRequest(format!(
-            "Virtual drive size must be at least {} MB",
-            MIN_DRIVE_SIZE_MB
-        )));
+        return Err(MsdErrorCode::MsdDriveSizeInvalid.into());
     }
     if requested_bytes > available_bytes {
-        return Err(AppError::BadRequest(format!(
-            "Virtual drive size cannot exceed available space on the MSD directory filesystem (available {} MB, requested {} MB)",
-            available_bytes / MIB,
-            size_mb
-        )));
+        return Err(MsdErrorCode::MsdStorageFull.into());
     }
     Ok(())
 }
 
 #[cfg(unix)]
-fn is_unsupported_drive_filesystem(error: &str) -> bool {
-    error.contains("Filesystem error")
-        || error.contains("Image error")
-        || error.contains("Partition error")
+fn msd_controller<'a>(
+    guard: &'a tokio::sync::RwLockReadGuard<'_, Option<crate::msd::MsdController>>,
+) -> Result<&'a crate::msd::MsdController> {
+    guard
+        .as_ref()
+        .ok_or_else(|| MsdErrorCode::MsdUnavailable.into())
 }
 
 #[cfg(unix)]
-fn unsupported_drive_filesystem_error(error: &str) -> AppError {
-    tracing::warn!(
-        error = %error,
-        "Virtual drive filesystem is not supported"
-    );
-    AppError::BadRequest("Unsupported drive filesystem".to_string())
+fn classify_storage_error(operation: &'static str, error: std::io::Error) -> AppError {
+    tracing::warn!(operation, %error, "MSD storage operation failed");
+    match error.raw_os_error() {
+        Some(libc::ENOSPC) => MsdErrorCode::MsdStorageFull.into(),
+        Some(libc::EROFS) => MsdErrorCode::MsdStorageReadOnly.into(),
+        Some(libc::EACCES | libc::EPERM) => MsdErrorCode::MsdStoragePermissionDenied.into(),
+        _ => MsdErrorCode::MsdOperationFailed.into(),
+    }
+}
+
+#[cfg(unix)]
+fn operation_failed(operation: &'static str, error: AppError) -> AppError {
+    match error {
+        AppError::Msd(error) => AppError::Msd(error),
+        error => {
+            tracing::warn!(operation, %error, "Unclassified MSD operation failed");
+            MsdErrorCode::MsdOperationFailed.into()
+        }
+    }
+}
+
+#[cfg(unix)]
+fn parse_msd_json<T>(payload: std::result::Result<Json<T>, JsonRejection>) -> Result<T> {
+    payload.map(|Json(value)| value).map_err(|error| {
+        tracing::warn!(%error, "Failed to parse MSD JSON request");
+        MsdErrorCode::MsdInvalidRequest.into()
+    })
+}
+
+#[cfg(unix)]
+fn parse_msd_multipart(
+    payload: std::result::Result<Multipart, MultipartRejection>,
+) -> Result<Multipart> {
+    payload.map_err(|error| {
+        tracing::warn!(%error, "Failed to parse MSD multipart request");
+        MsdErrorCode::MsdInvalidRequest.into()
+    })
 }
 
 /// MSD status response
@@ -115,22 +140,22 @@ pub async fn msd_images_list(State(state): State<Arc<AppState>>) -> Result<Json<
 #[cfg(unix)]
 pub async fn msd_image_upload(
     State(state): State<Arc<AppState>>,
-    mut multipart: Multipart,
+    multipart: std::result::Result<Multipart, MultipartRejection>,
 ) -> Result<Json<ImageInfo>> {
+    let mut multipart = parse_msd_multipart(multipart)?;
     let config = state.config.get();
     let images_path = config.msd.images_dir();
     let manager = ImageManager::new(images_path);
 
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| AppError::Internal(format!("Multipart error: {}", e)))?
-    {
+    while let Some(field) = multipart.next_field().await.map_err(|error| {
+        tracing::warn!(%error, "Failed to parse MSD image upload");
+        AppError::from(MsdErrorCode::MsdInvalidRequest)
+    })? {
         let name = field.name().unwrap_or("file").to_string();
         if name == "file" {
             let filename = field
                 .file_name()
-                .ok_or_else(|| AppError::BadRequest("Missing filename".to_string()))?
+                .ok_or_else(|| AppError::from(MsdErrorCode::MsdInvalidRequest))?
                 .to_string();
 
             // Use streaming upload - chunks are written directly to disk
@@ -142,7 +167,7 @@ pub async fn msd_image_upload(
         }
     }
 
-    Err(AppError::BadRequest("No file provided".to_string()))
+    Err(MsdErrorCode::MsdInvalidRequest.into())
 }
 
 /// Get image by ID
@@ -166,10 +191,11 @@ pub async fn msd_image_delete(
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<LoginResponse>> {
     let msd_guard = state.msd.read().await;
-    let controller = msd_guard
-        .as_ref()
-        .ok_or_else(|| AppError::Internal("MSD not initialized".to_string()))?;
-    controller.delete_image(&id).await?;
+    let controller = msd_controller(&msd_guard)?;
+    controller
+        .delete_image(&id)
+        .await
+        .map_err(|error| operation_failed("delete image", error))?;
     Ok(Json(LoginResponse {
         success: true,
         message: Some("Image deleted".to_string()),
@@ -180,14 +206,16 @@ pub async fn msd_image_delete(
 #[cfg(unix)]
 pub async fn msd_image_download(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<ImageDownloadRequest>,
+    payload: std::result::Result<Json<ImageDownloadRequest>, JsonRejection>,
 ) -> Result<Json<DownloadProgress>> {
+    let req = parse_msd_json(payload)?;
     let msd_guard = state.msd.read().await;
-    let controller = msd_guard
-        .as_ref()
-        .ok_or_else(|| AppError::Internal("MSD not initialized".to_string()))?;
+    let controller = msd_controller(&msd_guard)?;
 
-    let progress = controller.download_image(req.url, req.filename).await?;
+    let progress = controller
+        .download_image(req.url, req.filename)
+        .await
+        .map_err(|error| operation_failed("start image download", error))?;
 
     Ok(Json(progress))
 }
@@ -202,14 +230,16 @@ pub struct CancelDownloadRequest {
 #[cfg(unix)]
 pub async fn msd_image_download_cancel(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<CancelDownloadRequest>,
+    payload: std::result::Result<Json<CancelDownloadRequest>, JsonRejection>,
 ) -> Result<Json<LoginResponse>> {
+    let req = parse_msd_json(payload)?;
     let msd_guard = state.msd.read().await;
-    let controller = msd_guard
-        .as_ref()
-        .ok_or_else(|| AppError::Internal("MSD not initialized".to_string()))?;
+    let controller = msd_controller(&msd_guard)?;
 
-    controller.cancel_download(&req.download_id).await?;
+    controller
+        .cancel_download(&req.download_id)
+        .await
+        .map_err(|error| operation_failed("cancel image download", error))?;
 
     Ok(Json(LoginResponse {
         success: true,
@@ -221,14 +251,16 @@ pub async fn msd_image_download_cancel(
 #[cfg(unix)]
 pub async fn msd_disk_mode_put(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<DiskModeRequest>,
+    payload: std::result::Result<Json<DiskModeRequest>, JsonRejection>,
 ) -> Result<Json<LoginResponse>> {
-    let _otg_guard = try_apply_lock(&state.config_apply_locks.otg, "OTG")?;
+    let req = parse_msd_json(payload)?;
+    let _otg_guard = try_apply_lock(&state.config_apply_locks.otg, "OTG").map_err(|error| {
+        tracing::warn!(%error, "MSD disk mode change is blocked by another OTG operation");
+        AppError::from(MsdErrorCode::MsdOperationInProgress)
+    })?;
     let current_mode = {
         let msd_guard = state.msd.read().await;
-        let controller = msd_guard
-            .as_ref()
-            .ok_or_else(|| AppError::Internal("MSD not initialized".to_string()))?;
+        let controller = msd_controller(&msd_guard)?;
         controller.state().await.disk_mode
     };
     if current_mode == req.disk_mode {
@@ -248,14 +280,14 @@ pub async fn msd_disk_mode_put(
             .hid
             .prepare_otg_rebuild()
             .await
-            .map_err(|e| AppError::Config(format!("Failed to prepare OTG HID for rebuild: {e}")))?;
+            .map_err(|error| operation_failed("prepare HID for disk mode switch", error))?;
     }
 
     let switch_result = {
         let mut msd_guard = state.msd.write().await;
         let controller = msd_guard
             .as_mut()
-            .ok_or_else(|| AppError::Internal("MSD not initialized".to_string()))?;
+            .ok_or_else(|| AppError::from(MsdErrorCode::MsdUnavailable))?;
         controller.set_disk_mode(req.disk_mode).await
     };
 
@@ -271,12 +303,18 @@ pub async fn msd_disk_mode_put(
 
     match (switch_result, hid_reload_result) {
         (Err(switch_error), Err(hid_error)) => {
-            return Err(AppError::Internal(format!(
-                "MSD disk mode switch failed: {switch_error}; HID recovery failed: {hid_error}"
-            )));
+            tracing::warn!(%switch_error, %hid_error, "MSD mode switch and HID recovery failed");
+            return Err(MsdErrorCode::MsdOperationFailed.into());
         }
-        (Err(switch_error), Ok(())) => return Err(switch_error),
-        (Ok(_), Err(hid_error)) => return Err(hid_error),
+        (Err(switch_error), Ok(())) => {
+            return Err(operation_failed("switch disk mode", switch_error))
+        }
+        (Ok(_), Err(hid_error)) => {
+            return Err(operation_failed(
+                "recover HID after disk mode switch",
+                hid_error,
+            ))
+        }
         (Ok(_), Ok(())) => {}
     }
 
@@ -291,13 +329,14 @@ pub async fn msd_disk_mode_put(
 pub async fn msd_image_mount(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
-    Json(req): Json<ImageMountRequest>,
+    payload: std::result::Result<Json<ImageMountRequest>, JsonRejection>,
 ) -> Result<Json<LoginResponse>> {
+    let req = parse_msd_json(payload)?;
     let config = state.config.get();
     let mut msd_guard = state.msd.write().await;
     let controller = msd_guard
         .as_mut()
-        .ok_or_else(|| AppError::Internal("MSD not initialized".to_string()))?;
+        .ok_or_else(|| AppError::from(MsdErrorCode::MsdUnavailable))?;
 
     let images_path = config.msd.images_dir();
     let manager = ImageManager::new(images_path);
@@ -305,7 +344,8 @@ pub async fn msd_image_mount(
 
     controller
         .mount_image(&image, req.cdrom, req.read_only)
-        .await?;
+        .await
+        .map_err(|error| operation_failed("mount image", error))?;
 
     Ok(Json(LoginResponse {
         success: true,
@@ -322,9 +362,12 @@ pub async fn msd_image_unmount(
     let mut msd_guard = state.msd.write().await;
     let controller = msd_guard
         .as_mut()
-        .ok_or_else(|| AppError::Internal("MSD not initialized".to_string()))?;
+        .ok_or_else(|| AppError::from(MsdErrorCode::MsdUnavailable))?;
 
-    controller.unmount_image(&id).await?;
+    controller
+        .unmount_image(&id)
+        .await
+        .map_err(|error| operation_failed("unmount image", error))?;
 
     Ok(Json(LoginResponse {
         success: true,
@@ -338,9 +381,12 @@ pub async fn msd_drive_mount(State(state): State<Arc<AppState>>) -> Result<Json<
     let mut msd_guard = state.msd.write().await;
     let controller = msd_guard
         .as_mut()
-        .ok_or_else(|| AppError::Internal("MSD not initialized".to_string()))?;
+        .ok_or_else(|| AppError::from(MsdErrorCode::MsdUnavailable))?;
 
-    controller.mount_drive().await?;
+    controller
+        .mount_drive()
+        .await
+        .map_err(|error| operation_failed("mount virtual drive", error))?;
 
     Ok(Json(LoginResponse {
         success: true,
@@ -354,9 +400,12 @@ pub async fn msd_drive_unmount(State(state): State<Arc<AppState>>) -> Result<Jso
     let mut msd_guard = state.msd.write().await;
     let controller = msd_guard
         .as_mut()
-        .ok_or_else(|| AppError::Internal("MSD not initialized".to_string()))?;
+        .ok_or_else(|| AppError::from(MsdErrorCode::MsdUnavailable))?;
 
-    controller.unmount_drive().await?;
+    controller
+        .unmount_drive()
+        .await
+        .map_err(|error| operation_failed("unmount virtual drive", error))?;
 
     Ok(Json(LoginResponse {
         success: true,
@@ -373,46 +422,40 @@ pub async fn msd_drive_info(State(state): State<Arc<AppState>>) -> Result<Json<D
 
     if !drive.exists() {
         // 404: drive image file does not exist at all — truly not initialized
-        return Err(AppError::NotFound("Drive not initialized".to_string()));
+        return Err(MsdErrorCode::MsdDriveNotInitialized.into());
     }
 
-    match drive.info().await {
-        Ok(info) => Ok(Json(info)),
-        Err(e) => {
-            let msg = e.to_string();
-            // Detect filesystem-level failures (unrecognized format, bad partition table, etc.)
-            // These mean the drive FILE exists but was formatted to an unsupported type
-            // (e.g. the controlled machine reformatted it as NTFS/exFAT).
-            // Return 400 so the frontend can distinguish this from 404 (file missing).
-            if is_unsupported_drive_filesystem(&msg) {
-                return Err(unsupported_drive_filesystem_error(&msg));
-            }
-            Err(e)
-        }
-    }
+    drive
+        .info()
+        .await
+        .map(Json)
+        .map_err(|error| operation_failed("read virtual drive info", error))
 }
 
 /// Initialize Ventoy drive
 #[cfg(unix)]
 pub async fn msd_drive_init(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<DriveInitRequest>,
+    payload: std::result::Result<Json<DriveInitRequest>, JsonRejection>,
 ) -> Result<Json<DriveInfo>> {
+    let req = parse_msd_json(payload)?;
+    assert_drive_not_connected(&state).await?;
     let config = state.config.get();
     let msd_dir = config.msd.msd_dir_path();
 
-    let disk_space = get_disk_space(&msd_dir).map_err(|e| {
-        AppError::BadRequest(format!(
-            "Failed to read available space for the MSD directory filesystem: {}",
-            e
-        ))
+    let disk_space = get_disk_space(&msd_dir).map_err(|error| {
+        tracing::warn!(%error, "Failed to read MSD storage space");
+        AppError::from(MsdErrorCode::MsdStorageSpaceUnavailable)
     })?;
     validate_drive_init_size(req.size_mb, disk_space.available)?;
 
     let drive_path = config.msd.drive_path();
     let drive = VentoyDrive::new(drive_path);
 
-    let info = drive.init(req.size_mb).await?;
+    let info = drive
+        .init(req.size_mb)
+        .await
+        .map_err(|error| operation_failed("initialize virtual drive", error))?;
     Ok(Json(info))
 }
 
@@ -425,9 +468,7 @@ pub async fn msd_drive_delete(State(state): State<Arc<AppState>>) -> Result<Json
     let msd_guard = state.msd.write().await;
     if let Some(controller) = msd_guard.as_ref() {
         if controller.is_drive_connected().await {
-            return Err(AppError::BadRequest(
-                "Cannot delete drive while connected. Disconnect first.".to_string(),
-            ));
+            return Err(MsdErrorCode::MsdDriveConnected.into());
         }
     }
     drop(msd_guard);
@@ -436,7 +477,7 @@ pub async fn msd_drive_delete(State(state): State<Arc<AppState>>) -> Result<Json
     let drive_path = config.msd.drive_path();
     if drive_path.exists() {
         std::fs::remove_file(&drive_path)
-            .map_err(|e| AppError::Internal(format!("Failed to delete drive file: {}", e)))?;
+            .map_err(|error| classify_storage_error("delete virtual drive", error))?;
     }
 
     Ok(Json(LoginResponse {
@@ -459,16 +500,10 @@ pub async fn msd_drive_files(
     let drive = VentoyDrive::new(drive_path);
 
     let dir_path = params.get("path").map(|s| s.as_str()).unwrap_or("/");
-    let files = drive.list_files(dir_path).await.map_err(|e| {
-        // Provide a friendly message when the filesystem format is unrecognized
-        // (e.g. user formatted it as NTFS/exFAT from the controlled machine)
-        let msg = e.to_string();
-        if is_unsupported_drive_filesystem(&msg) {
-            unsupported_drive_filesystem_error(&msg)
-        } else {
-            e
-        }
-    })?;
+    let files = drive
+        .list_files(dir_path)
+        .await
+        .map_err(|error| operation_failed("list virtual drive files", error))?;
     Ok(Json(files))
 }
 
@@ -477,8 +512,9 @@ pub async fn msd_drive_files(
 pub async fn msd_drive_upload(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
-    mut multipart: Multipart,
+    multipart: std::result::Result<Multipart, MultipartRejection>,
 ) -> Result<Json<LoginResponse>> {
+    let mut multipart = parse_msd_multipart(multipart)?;
     // Block when connected: writing to image while USB host has it mounted
     // causes filesystem corruption (Windows error 0x80070570)
     assert_drive_not_connected(&state).await?;
@@ -489,16 +525,15 @@ pub async fn msd_drive_upload(
 
     let target_dir = params.get("path").map(|s| s.as_str()).unwrap_or("/");
 
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| AppError::Internal(format!("Multipart error: {}", e)))?
-    {
+    while let Some(field) = multipart.next_field().await.map_err(|error| {
+        tracing::warn!(%error, "Failed to parse virtual drive file upload");
+        AppError::from(MsdErrorCode::MsdInvalidRequest)
+    })? {
         let name = field.name().unwrap_or("file").to_string();
         if name == "file" {
             let filename = field
                 .file_name()
-                .ok_or_else(|| AppError::BadRequest("Missing filename".to_string()))?
+                .ok_or_else(|| AppError::from(MsdErrorCode::MsdInvalidRequest))?
                 .to_string();
 
             let file_path = if target_dir == "/" {
@@ -511,7 +546,8 @@ pub async fn msd_drive_upload(
             // This avoids loading the entire file into memory
             drive
                 .write_file_from_multipart_field(&file_path, field)
-                .await?;
+                .await
+                .map_err(|error| operation_failed("upload virtual drive file", error))?;
 
             return Ok(Json(LoginResponse {
                 success: true,
@@ -520,7 +556,7 @@ pub async fn msd_drive_upload(
         }
     }
 
-    Err(AppError::BadRequest("No file provided".to_string()))
+    Err(MsdErrorCode::MsdInvalidRequest.into())
 }
 
 /// Download file from drive (streaming for large files)
@@ -538,7 +574,10 @@ pub async fn msd_drive_download(
     let drive = VentoyDrive::new(drive_path);
 
     // Get file stream (returns file size and channel receiver)
-    let (file_size, mut rx) = drive.read_file_stream(&file_path).await?;
+    let (file_size, mut rx) = drive
+        .read_file_stream(&file_path)
+        .await
+        .map_err(|error| operation_failed("download virtual drive file", error))?;
 
     // Extract filename for Content-Disposition
     let filename = file_path.split('/').next_back().unwrap_or("download");
@@ -576,7 +615,10 @@ pub async fn msd_drive_file_delete(
     let drive_path = config.msd.drive_path();
     let drive = VentoyDrive::new(drive_path);
 
-    drive.delete(&file_path).await?;
+    drive
+        .delete(&file_path)
+        .await
+        .map_err(|error| operation_failed("delete virtual drive file", error))?;
 
     Ok(Json(LoginResponse {
         success: true,
@@ -598,7 +640,10 @@ pub async fn msd_drive_mkdir(
     let drive_path = config.msd.drive_path();
     let drive = VentoyDrive::new(drive_path);
 
-    drive.mkdir(&dir_path).await?;
+    drive
+        .mkdir(&dir_path)
+        .await
+        .map_err(|error| operation_failed("create virtual drive directory", error))?;
 
     Ok(Json(LoginResponse {
         success: true,
@@ -618,25 +663,24 @@ mod tests {
     #[test]
     fn validate_drive_init_size_rejects_below_64mb() {
         let err = validate_drive_init_size(MIN_DRIVE_SIZE_MB - 1, 1024 * MIB).unwrap_err();
-        assert!(err.to_string().contains("at least 64 MB"));
+        assert!(
+            matches!(err, AppError::Msd(error) if error.code() == MsdErrorCode::MsdDriveSizeInvalid)
+        );
     }
 
     #[test]
     fn validate_drive_init_size_rejects_available_space_overflow() {
         let err = validate_drive_init_size(65, 64 * MIB).unwrap_err();
-        assert!(err.to_string().contains("cannot exceed available space"));
+        assert!(
+            matches!(err, AppError::Msd(error) if error.code() == MsdErrorCode::MsdStorageFull)
+        );
     }
 
     #[test]
-    fn detects_unsupported_drive_filesystem_errors() {
-        assert!(is_unsupported_drive_filesystem(
-            "Internal error: Filesystem error: Invalid exFAT signature"
-        ));
-        assert!(is_unsupported_drive_filesystem(
-            "Internal error: Partition error: invalid partition table"
-        ));
-        assert!(!is_unsupported_drive_filesystem(
-            "IO error: permission denied"
-        ));
+    fn classifies_storage_permissions_without_exposing_the_io_error() {
+        let error = classify_storage_error("test", std::io::Error::from_raw_os_error(libc::EACCES));
+        assert!(
+            matches!(error, AppError::Msd(error) if error.code() == MsdErrorCode::MsdStoragePermissionDenied)
+        );
     }
 }

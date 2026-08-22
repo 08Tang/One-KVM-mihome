@@ -11,6 +11,7 @@ mod hid;
 mod mihome;
 mod otg_network;
 mod stream;
+mod uac;
 mod watchdog;
 mod web;
 
@@ -21,6 +22,7 @@ pub use hid::*;
 pub use mihome::*;
 pub use otg_network::*;
 pub use stream::*;
+pub use uac::*;
 pub use watchdog::*;
 pub use web::*;
 
@@ -47,6 +49,7 @@ pub struct AppConfig {
     pub redfish: RedfishConfig,
     pub mihome: MiHomeConfig,
     pub watchdog: WatchdogConfig,
+    pub uac: UacConfig,
 }
 
 impl AppConfig {
@@ -54,6 +57,7 @@ impl AppConfig {
         if self.hid.backend != HidBackend::Otg {
             self.msd.enabled = false;
             self.otg_network.enabled = false;
+            self.uac.enabled = false;
         }
         self.atx.normalize();
     }

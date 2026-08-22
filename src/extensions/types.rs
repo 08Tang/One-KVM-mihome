@@ -103,11 +103,25 @@ impl Default for GostcConfig {
 }
 
 #[typeshare]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EasytierConfigMode {
+    Quick,
+    Full,
+}
+
+impl Default for EasytierConfigMode {
+    fn default() -> Self {
+        Self::Quick
+    }
+}
+
+#[typeshare]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
-#[derive(Default)]
 pub struct EasytierConfig {
     pub enabled: bool,
+    pub config_mode: EasytierConfigMode,
     pub network_name: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub network_secret: String,
@@ -115,6 +129,8 @@ pub struct EasytierConfig {
     pub peer_urls: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub virtual_ip: Option<String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub custom_toml: String,
 }
 
 #[typeshare]
@@ -259,4 +275,27 @@ pub struct ExtensionsStatus {
 pub struct ExtensionLogs {
     pub id: ExtensionId,
     pub logs: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EasytierConfig, EasytierConfigMode};
+
+    #[test]
+    fn legacy_easytier_config_defaults_to_quick_mode() {
+        let config: EasytierConfig = serde_json::from_str(
+            r#"{
+                "enabled": true,
+                "network_name": "legacy-network",
+                "network_secret": "secret",
+                "peer_urls": ["tcp://example.com:11010"],
+                "virtual_ip": "10.10.10.2/24"
+            }"#,
+        )
+        .expect("legacy EasyTier config should deserialize");
+
+        assert_eq!(config.config_mode, EasytierConfigMode::Quick);
+        assert!(config.custom_toml.is_empty());
+        assert_eq!(config.network_name, "legacy-network");
+    }
 }

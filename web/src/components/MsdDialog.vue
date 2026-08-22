@@ -4,7 +4,7 @@ import { useI18n } from 'vue-i18n'
 import { toast } from 'vue-sonner'
 import { useSystemStore } from '@/stores/system'
 import { msdApi, type MsdImage, type DriveFile, type MountedMedia, type DiskMode } from '@/api'
-import { ApiError } from '@/api/request'
+import { ApiError, localizeMsdErrorCode } from '@/api/request'
 import { useWebSocket } from '@/composables/useWebSocket'
 import {
   Dialog,
@@ -64,11 +64,16 @@ const systemStore = useSystemStore()
 const { on, off } = useWebSocket()
 
 const activeTab = ref('images')
+const msdStatusError = ref<string | null>(null)
 
 const images = ref<MsdImage[]>([])
 const loadingImages = ref(false)
+const imagesError = ref<string | null>(null)
 const uploadProgress = ref(0)
 const uploading = ref(false)
+const uploadProgressPercent = computed(() =>
+  Math.round(Math.min(100, Math.max(0, uploadProgress.value))),
+)
 
 const mountMode = ref<'cdrom' | 'flash'>('flash')
 // Default to readwrite for flash mode; cdrom forces readonly anyway
@@ -92,6 +97,8 @@ const driveInitialized = ref(false)
 const uploadingFile = ref(false)
 const fileUploadProgress = ref(0)
 const driveError = ref<string | null>(null) // filesystem error (e.g. unsupported format)
+const driveErrorCode = ref<string | null>(null)
+const driveFilesystemUnsupported = computed(() => driveErrorCode.value === 'MSD_DRIVE_FILESYSTEM_UNSUPPORTED')
 
 const showDeleteDialog = ref(false)
 const deleteTarget = ref<{ type: 'image' | 'file'; id: string; name: string } | null>(null)
@@ -150,7 +157,9 @@ const downloadProgress = ref<{
   total_bytes: number | null
   progress_pct: number | null
   status: string
+  error_code: string | null
 } | null>(null)
+const downloadFailureNotifiedId = ref<string | null>(null)
 
 const TWO_POINT_TWO_GB = 2.2 * 1024 * 1024 * 1024
 const tabTriggerClass = 'h-8 rounded-md border-0 bg-transparent text-center text-muted-foreground shadow-none hover:text-foreground data-[state=active]:border-0 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm'
@@ -241,7 +250,7 @@ async function refreshDiskSpace() {
 
 async function loadData() {
   await refreshDiskSpace()
-  await systemStore.fetchMsdState()
+  await refreshMsdState()
   await loadImages()
   await loadDriveInfo()
   if (driveInitialized.value) {
@@ -249,12 +258,24 @@ async function loadData() {
   }
 }
 
+async function refreshMsdState() {
+  msdStatusError.value = null
+  try {
+    await systemStore.fetchMsdState()
+  } catch (e: any) {
+    msdStatusError.value = e?.message ?? t('msd.errors.operationFailed')
+  }
+}
+
 async function loadImages() {
   loadingImages.value = true
+  imagesError.value = null
   try {
     images.value = await msdApi.listImages()
-  } catch (e) {
+  } catch (e: any) {
     console.error('Failed to load images:', e)
+    imagesError.value = e?.message ?? t('msd.errors.operationFailed')
+    images.value = []
   } finally {
     loadingImages.value = false
   }
@@ -308,7 +329,7 @@ async function confirmImageMount() {
   connecting.value = true
   try {
     await msdApi.mountImage(image.id, cdromMode.value, cdromMode.value || readOnly.value)
-    await systemStore.fetchMsdState()
+    await refreshMsdState()
     showMountOptionsDialog.value = false
     pendingMountImage.value = null
   } catch (e) {
@@ -333,7 +354,7 @@ async function connectDrive() {
   connecting.value = true
   try {
     await msdApi.mountDrive()
-    await systemStore.fetchMsdState()
+    await refreshMsdState()
   } catch (e) {
     console.error('Failed to mount drive:', e)
   } finally {
@@ -352,7 +373,7 @@ async function unmountMedia(media: MountedMedia) {
     } else {
       await msdApi.unmountImage(media.id)
     }
-    await systemStore.fetchMsdState()
+    await refreshMsdState()
   } catch (e) {
     console.error('Failed to unmount media:', e)
   } finally {
@@ -374,7 +395,7 @@ async function changeDiskMode(value: unknown) {
   modeChanging.value = true
   try {
     await msdApi.setDiskMode(next as DiskMode)
-    await systemStore.fetchMsdState()
+    await refreshMsdState()
   } catch (e) {
     console.error('Failed to change MSD disk mode:', e)
   } finally {
@@ -408,9 +429,8 @@ async function executeDelete() {
       await msdApi.deleteDriveFile(deleteTarget.value.id)
       await loadDriveFiles()
     }
-  } catch (e: any) {
+  } catch (e) {
     console.error('Failed to delete:', e)
-    toast.error(t('common.error'), { description: e?.message })
   } finally {
     showDeleteDialog.value = false
     deleteTarget.value = null
@@ -420,12 +440,13 @@ async function executeDelete() {
 
 async function loadDriveInfo() {
   driveError.value = null
+  driveErrorCode.value = null
   try {
     driveInfo.value = await msdApi.driveInfo()
     driveInitialized.value = true
   } catch (e: any) {
     if (e instanceof ApiError) {
-      if (e.status === 404) {
+      if (e.code === 'MSD_DRIVE_NOT_INITIALIZED' || e.status === 404) {
         // Drive image file does not exist — truly not initialized
         driveInitialized.value = false
         driveInfo.value = null
@@ -435,6 +456,7 @@ async function loadDriveInfo() {
         // an error banner instead of the misleading "Initialize Drive" button.
         driveInitialized.value = true
         driveError.value = e.message
+        driveErrorCode.value = e.code ?? null
         driveInfo.value = null
       }
     } else {
@@ -469,16 +491,6 @@ async function createDrive() {
     showDriveInitDialog.value = false
   } catch (e) {
     console.error('Failed to initialize drive:', e)
-    let description: string | undefined
-    if (e instanceof ApiError) {
-      const message = e.message
-      if (message.includes('does not support a virtual drive file')) description = t('msd.driveFileTooLarge')
-      else if (message.includes('does not have enough free space')) description = t('msd.driveSpaceUnavailable')
-      else if (message.includes('filesystem is read-only')) description = t('msd.driveReadOnly')
-      else if (message.includes('permission to write')) description = t('msd.drivePermissionDenied')
-      else description = message
-    }
-    toast.error(t('msd.driveCreateFailed'), { description })
   } finally {
     initializingDrive.value = false
   }
@@ -510,12 +522,14 @@ async function loadDriveFiles() {
   }
   loadingDrive.value = true
   driveError.value = null
+  driveErrorCode.value = null
   try {
     driveFiles.value = await msdApi.listDriveFiles(currentPath.value)
   } catch (e: any) {
     console.error('Failed to load drive files:', e)
     // Surface the error — could be unsupported filesystem format
     driveError.value = e?.message ?? String(e)
+    driveErrorCode.value = e instanceof ApiError ? (e.code ?? null) : null
     driveFiles.value = []
   } finally {
     loadingDrive.value = false
@@ -564,9 +578,8 @@ async function handleFileUpload(e: Event) {
       fileUploadProgress.value = progress
     })
     await loadDriveFiles()
-  } catch (e: any) {
+  } catch (e) {
     console.error('Failed to upload file:', e)
-    toast.error(t('msd.uploadFailed'), { description: e?.message })
   } finally {
     uploadingFile.value = false
     fileUploadProgress.value = 0
@@ -591,9 +604,8 @@ async function createFolder() {
       : currentPath.value + '/' + newFolderName.value
     await msdApi.createDirectory(path)
     await loadDriveFiles()
-  } catch (e: any) {
+  } catch (e) {
     console.error('Failed to create folder:', e)
-    toast.error(t('common.error'), { description: e?.message })
   } finally {
     showNewFolderDialog.value = false
     newFolderName.value = ''
@@ -616,6 +628,7 @@ async function startUrlDownload() {
       total_bytes: result.total_bytes,
       progress_pct: result.progress_pct,
       status: result.status,
+      error_code: result.error_code,
     }
   } catch (e) {
     console.error('Failed to start download:', e)
@@ -649,6 +662,7 @@ function handleDownloadProgress(data: {
   total_bytes: number | null
   progress_pct: number | null
   status: string
+  error_code: string | null
 }) {
   if (downloadProgress.value?.download_id === data.download_id) {
     downloadProgress.value = data
@@ -659,8 +673,14 @@ function handleDownloadProgress(data: {
         showUrlDialog.value = false
         resetDownloadState()
       }, 1000)
-    } else if (data.status.startsWith('failed')) {
+    } else if (data.status === 'failed') {
       downloading.value = false
+      if (downloadFailureNotifiedId.value !== data.download_id) {
+        downloadFailureNotifiedId.value = data.download_id
+        toast.error(t('msd.operations.downloadImage'), {
+          description: localizeMsdErrorCode(data.error_code ?? undefined),
+        })
+      }
     }
   }
 }
@@ -697,8 +717,8 @@ onUnmounted(() => {
           <span class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
             <span :class="msdConnected ? 'text-success' : 'text-muted-foreground'" class="flex items-center gap-1.5">
               <span class="relative flex size-2">
-                <span v-if="msdConnected" class="absolute inline-flex h-full w-full animate-ping rounded-full bg-success opacity-75"></span>
-                <span :class="msdConnected ? 'bg-success' : 'bg-muted-foreground'" class="relative inline-flex size-2 rounded-full"></span>
+                <span v-if="msdConnected" class="absolute inline-flex size-full animate-ping rounded-full bg-status-active opacity-75"></span>
+                <span :class="msdConnected ? 'bg-status-active' : 'bg-muted-foreground'" class="relative inline-flex size-2 rounded-full"></span>
               </span>
               {{ msdConnected ? t('common.connected') : t('common.disconnected') }}
             </span>
@@ -747,6 +767,17 @@ onUnmounted(() => {
 
       <Separator class="shrink-0" />
 
+      <div
+        v-if="msdStatusError"
+        class="mx-5 mt-3 flex shrink-0 items-center justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/5 p-3"
+      >
+        <div class="min-w-0">
+          <p class="text-sm font-medium text-destructive">{{ t('msd.operations.loadStatus') }}</p>
+          <p class="mt-1 text-xs text-muted-foreground">{{ msdStatusError }}</p>
+        </div>
+        <Button variant="outline" size="sm" @click="refreshMsdState">{{ t('common.retry') }}</Button>
+      </div>
+
       <div class="flex-1 min-h-0 flex flex-col px-5 pb-4 pt-3">
         <Tabs v-model="activeTab" class="flex-1 flex flex-col min-h-0">
           <TabsList class="grid h-auto w-full shrink-0 grid-cols-2 gap-1 rounded-md border border-border bg-muted p-0.5">
@@ -793,98 +824,116 @@ onUnmounted(() => {
                   </Button>
                 </div>
               </div>
-              <Progress v-if="uploading" :model-value="uploadProgress" class="h-1 shrink-0" />
-
-              <Skeleton v-if="loadingImages" class="h-24 w-full" />
-              <Empty v-else-if="images.length === 0" class="shrink-0 py-6">
-                <EmptyHeader>
-                  <EmptyMedia variant="icon"><HardDrive /></EmptyMedia>
-                  <EmptyDescription>{{ t('msd.noImages') }}</EmptyDescription>
-                </EmptyHeader>
-              </Empty>
-
-              <div v-else class="flex-1 min-h-0 overflow-y-auto pr-2 custom-scrollbar">
+              <div class="min-h-0 flex-1 overflow-y-auto pr-2 custom-scrollbar">
                 <div class="space-y-2">
                   <div
-                    v-for="image in images"
-                    :key="image.id"
-                    class="rounded-md border p-2.5 transition-colors"
-                    :class="[
-                      mountedImage(image.id)
-                        ? 'border-primary/40 bg-muted/50'
-                        : 'border-border bg-background hover:bg-muted/40'
-                    ]"
+                    v-if="uploading"
+                    class="grid shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2"
                   >
-                    <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                      <div class="flex min-w-0 flex-1 items-start gap-2">
-                        <span v-if="mountedImage(image.id)" class="mt-1.5 size-2 shrink-0 rounded-full bg-primary" />
-                        <Disc v-else class="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-                        <div class="w-0 flex-1">
-                          <Tooltip>
-                            <TooltipTrigger as-child>
-                              <p class="text-sm font-medium cursor-help overflow-hidden text-ellipsis whitespace-nowrap">{{ image.name }}</p>
-                            </TooltipTrigger>
-                            <TooltipContent>
-                              <p class="max-w-sm break-all">{{ image.name }}</p>
-                            </TooltipContent>
-                          </Tooltip>
-                          <div class="flex items-center gap-2 mt-0.5 flex-wrap">
-                            <span class="text-xs text-muted-foreground">{{ formatBytes(image.size) }}</span>
-                            <Tooltip v-if="isLargeFile(image)">
+                    <Progress :model-value="uploadProgress" class="h-1 min-w-0" />
+                    <span class="justify-self-end text-right text-xs tabular-nums text-muted-foreground">
+                      {{ uploadProgressPercent }}%
+                    </span>
+                  </div>
+
+                  <Skeleton v-if="loadingImages" class="h-24 w-full" />
+                  <div
+                    v-else-if="imagesError"
+                    class="flex shrink-0 items-center justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/5 p-3"
+                  >
+                    <div class="min-w-0">
+                      <p class="text-sm font-medium text-destructive">{{ t('msd.operations.loadImages') }}</p>
+                      <p class="mt-1 text-xs text-muted-foreground">{{ imagesError }}</p>
+                    </div>
+                    <Button variant="outline" size="sm" @click="loadImages">{{ t('common.retry') }}</Button>
+                  </div>
+                  <Empty v-else-if="images.length === 0" class="shrink-0 py-6">
+                    <EmptyHeader>
+                      <EmptyMedia variant="icon"><HardDrive /></EmptyMedia>
+                      <EmptyDescription>{{ t('msd.noImages') }}</EmptyDescription>
+                    </EmptyHeader>
+                  </Empty>
+
+                  <template v-else v-for="image in images" :key="image.id">
+                    <div
+                      class="rounded-md border p-2.5 transition-colors"
+                      :class="[
+                        mountedImage(image.id)
+                          ? 'border-primary/40 bg-muted/50'
+                          : 'border-border bg-background hover:bg-muted/40'
+                      ]"
+                    >
+                      <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                        <div class="flex min-w-0 flex-1 items-start gap-2">
+                          <span v-if="mountedImage(image.id)" class="mt-1.5 size-2 shrink-0 rounded-full bg-primary" />
+                          <Disc v-else class="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                          <div class="w-0 flex-1">
+                            <Tooltip>
                               <TooltipTrigger as-child>
-                                <Badge
-                                  variant="outline"
-                                  class="h-4 cursor-help border-warning/50 px-1.5 text-[10px] text-warning"
-                                >
-                                  <AlertCircle class="size-2.5 mr-0.5" />
-                                  {{ t('msd.largeFileWarning') }}
-                                </Badge>
+                                <p class="text-sm font-medium cursor-help overflow-hidden text-ellipsis whitespace-nowrap">{{ image.name }}</p>
                               </TooltipTrigger>
                               <TooltipContent>
-                                <p>{{ t('msd.largeFileTooltip') }}</p>
+                                <p class="max-w-sm break-all">{{ image.name }}</p>
                               </TooltipContent>
                             </Tooltip>
+                            <div class="flex items-center gap-2 mt-0.5 flex-wrap">
+                              <span class="text-xs text-muted-foreground">{{ formatBytes(image.size) }}</span>
+                              <Tooltip v-if="isLargeFile(image)">
+                                <TooltipTrigger as-child>
+                                  <Badge
+                                    variant="outline"
+                                    class="h-4 cursor-help border-warning/50 px-1.5 text-[10px] text-warning"
+                                  >
+                                    <AlertCircle class="size-2.5 mr-0.5" />
+                                    {{ t('msd.largeFileWarning') }}
+                                  </Badge>
+                                </TooltipTrigger>
+                                <TooltipContent>
+                                  <p>{{ t('msd.largeFileTooltip') }}</p>
+                                </TooltipContent>
+                              </Tooltip>
+                            </div>
                           </div>
                         </div>
-                      </div>
-                      <div class="flex shrink-0 items-center justify-end gap-1.5">
-                        <template v-if="mountedImage(image.id)">
+                        <div class="flex shrink-0 items-center justify-end gap-1.5">
+                          <template v-if="mountedImage(image.id)">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              class="h-8 text-xs"
+                              :disabled="operationInProgress"
+                              @click="unmountImageById(image.id)"
+                            >
+                              <Unlink class="size-3.5 mr-1" />
+                              {{ t('msd.disconnect') }}
+                            </Button>
+                          </template>
+                          <template v-else>
+                            <Button
+                              variant="default"
+                              size="sm"
+                              class="h-8 text-xs"
+                              :disabled="operationInProgress || mediaSlotsFull"
+                              @click="connectImage(image)"
+                            >
+                              <Link v-if="!connecting" class="size-3.5 mr-1" />
+                              <span v-if="connecting">{{ t('common.connecting') }}...</span>
+                              <span v-else>{{ t('msd.connect') }}</span>
+                            </Button>
+                          </template>
                           <Button
-                            variant="outline"
-                            size="sm"
-                            class="h-8 text-xs"
-                            :disabled="operationInProgress"
-                            @click="unmountImageById(image.id)"
+                            variant="ghost"
+                            size="icon"
+                            class="size-8 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                            :disabled="operationInProgress || !!mountedImage(image.id)"
+                            @click="confirmDelete('image', image.id, image.name)"
                           >
-                            <Unlink class="size-3.5 mr-1" />
-                            {{ t('msd.disconnect') }}
+                            <Trash2 class="size-3.5" />
                           </Button>
-                        </template>
-                        <template v-else>
-                          <Button
-                            variant="default"
-                            size="sm"
-                            class="h-8 text-xs"
-                            :disabled="operationInProgress || mediaSlotsFull"
-                            @click="connectImage(image)"
-                          >
-                            <Link v-if="!connecting" class="size-3.5 mr-1" />
-                            <span v-if="connecting">{{ t('common.connecting') }}...</span>
-                            <span v-else>{{ t('msd.connect') }}</span>
-                          </Button>
-                        </template>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          class="size-8 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                          :disabled="operationInProgress || !!mountedImage(image.id)"
-                          @click="confirmDelete('image', image.id, image.name)"
-                        >
-                          <Trash2 class="size-3.5" />
-                        </Button>
+                        </div>
                       </div>
                     </div>
-                  </div>
+                  </template>
                 </div>
               </div>
 
@@ -929,7 +978,7 @@ onUnmounted(() => {
                     <!-- Show unreadable badge when format is wrong -->
                     <template v-else-if="driveError">
                       <Badge variant="outline" class="text-xs border-destructive/50 text-destructive">
-                        {{ t('msd.driveUnreadable') }}
+                        {{ driveFilesystemUnsupported ? t('msd.driveUnreadable') : t('common.error') }}
                       </Badge>
                       <Tooltip>
                         <TooltipTrigger as-child>
@@ -938,14 +987,14 @@ onUnmounted(() => {
                           </span>
                         </TooltipTrigger>
                         <TooltipContent>
-                          <p>{{ t('msd.driveUnreadableTooltip') }}</p>
+                          <p>{{ driveError }}</p>
                         </TooltipContent>
                       </Tooltip>
                     </template>
                   </div>
                   <div class="flex items-center gap-1.5">
                     <!-- When drive format is unrecognized, only offer re-initialization -->
-                    <template v-if="driveError && !msdConnected">
+                    <template v-if="driveFilesystemUnsupported && !msdConnected">
                       <Button
                         variant="outline"
                         size="sm"
@@ -1011,6 +1060,17 @@ onUnmounted(() => {
                     <span>{{ formatBytes(driveInfo?.free || 0) }} {{ t('msd.freeSpace') }}</span>
                   </div>
                 </div>
+              </div>
+
+              <div
+                v-if="driveError"
+                class="flex shrink-0 items-center justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/5 p-3"
+              >
+                <div class="min-w-0">
+                  <p class="text-sm font-medium text-destructive">{{ t('msd.operations.loadDriveFiles') }}</p>
+                  <p class="mt-1 text-xs text-muted-foreground">{{ driveError }}</p>
+                </div>
+                <Button variant="outline" size="sm" @click="refreshDriveBrowser">{{ t('common.retry') }}</Button>
               </div>
 
 
@@ -1289,9 +1349,11 @@ onUnmounted(() => {
   <!-- Image Mount Options Dialog -->
   <Dialog v-model:open="showMountOptionsDialog">
     <DialogContent class="max-w-md">
-      <DialogHeader>
+      <DialogHeader class="min-w-0">
         <DialogTitle>{{ t('msd.mountImage') }}</DialogTitle>
-        <DialogDescription>
+        <DialogDescription
+          class="block min-w-0 truncate text-left"
+        >
           {{ pendingMountImage?.name }}
         </DialogDescription>
       </DialogHeader>
@@ -1410,8 +1472,8 @@ onUnmounted(() => {
           <div v-if="downloadProgress.status === 'completed'" class="text-xs text-success">
             {{ t('msd.downloadComplete') }}
           </div>
-          <div v-else-if="downloadProgress.status.startsWith('failed')" class="text-xs text-destructive">
-            {{ downloadProgress.status }}
+          <div v-else-if="downloadProgress.status === 'failed'" class="text-xs text-destructive">
+            {{ localizeMsdErrorCode(downloadProgress.error_code ?? undefined) }}
           </div>
         </div>
       </div>

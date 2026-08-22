@@ -1,8 +1,11 @@
 #[cfg(unix)]
-use axum::{extract::DefaultBodyLimit, routing::delete};
+use axum::{
+    extract::DefaultBodyLimit,
+    routing::{delete, put},
+};
 use axum::{
     middleware,
-    routing::{any, get, patch, post, put},
+    routing::{any, get, patch, post},
     Router,
 };
 use std::sync::Arc;
@@ -13,6 +16,8 @@ use tower_http::{
 
 use super::audio_ws::audio_ws_handler;
 use super::handlers;
+#[cfg(unix)]
+use super::uac_ws::uac_audio_ws_handler;
 use super::ws::ws_handler;
 use crate::auth::auth_middleware;
 use crate::hid::websocket::ws_hid_handler;
@@ -60,6 +65,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
         .route("/auth/totp/disable", post(handlers::disable_totp))
         .route("/devices", get(handlers::list_devices))
+        .route("/video/input-status", get(handlers::video_input_status))
         // WebSocket endpoint for real-time events
         .route("/ws", any(ws_handler))
         // Stream control endpoints
@@ -70,6 +76,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/stream/mode", post(handlers::stream_mode_set))
         .route("/stream/bitrate", post(handlers::stream_set_bitrate))
         .route("/stream/codecs", get(handlers::stream_codecs_list))
+        .route("/video/codecs", get(handlers::stream_codecs_list))
         .route("/stream/constraints", get(handlers::stream_constraints_get))
         .route(
             "/video/encoder/self-check",
@@ -271,6 +278,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     #[cfg(unix)]
     let user_routes = {
         user_routes
+            .route("/ws/uac-audio", any(uac_audio_ws_handler))
             .route("/hid/otg/self-check", get(handlers::hid_otg_self_check))
             .route("/config/msd", get(handlers::config::get_msd_config))
             .route("/config/msd", patch(handlers::config::update_msd_config))
@@ -287,6 +295,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
                 "/otg/network/status",
                 get(handlers::config::get_otg_network_status),
             )
+            .route("/config/uac", get(handlers::config::get_uac_config))
+            .route("/config/uac", patch(handlers::config::update_uac_config))
             .route("/msd/status", get(handlers::msd_status))
             .route("/msd/images", get(handlers::msd_images_list))
             .route("/msd/images/download", post(handlers::msd_image_download))

@@ -2,18 +2,13 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use super::CaptureReadError;
 use crate::error::{AppError, Result};
 use crate::video::device::bridge::{CsiBridgeKind, ProbeResult};
-use crate::video::device::{directshow_display_name_from_path, normalize_windows_device_path};
+use crate::video::device::{
+    directshow_display_name_from_path, normalize_windows_device_path, VideoControlMode,
+};
 use crate::video::format::{PixelFormat, Resolution};
-
-pub const SOURCE_CHANGED_MARKER: &str = "dshow_source_changed";
-
-pub fn is_source_changed_error(err: &io::Error) -> bool {
-    err.get_ref()
-        .map(|inner| inner.to_string() == SOURCE_CHANGED_MARKER)
-        .unwrap_or(false)
-}
 
 #[derive(Debug, Clone, Copy)]
 pub struct CaptureMeta {
@@ -95,8 +90,9 @@ impl CaptureStream {
         buffer_count: u32,
         timeout: Duration,
         bridge: BridgeContext,
+        control_mode: VideoControlMode,
     ) -> Result<Self> {
-        let _ = bridge;
+        let _ = (bridge, control_mode);
         Self::open(device_path, resolution, format, fps, buffer_count, timeout)
     }
 
@@ -108,11 +104,18 @@ impl CaptureStream {
         self.format
     }
 
+    pub fn source_fps(&self) -> Option<f64> {
+        None
+    }
+
     pub fn stride(&self) -> u32 {
         self.stride
     }
 
-    pub fn next_into(&mut self, dst: &mut Vec<u8>) -> io::Result<CaptureMeta> {
+    pub fn next_into(
+        &mut self,
+        dst: &mut Vec<u8>,
+    ) -> std::result::Result<CaptureMeta, CaptureReadError> {
         match self.capture.read_packet() {
             Ok((packet, sequence)) => {
                 dst.clear();
@@ -128,7 +131,7 @@ impl CaptureStream {
                 } else {
                     io::ErrorKind::Other
                 };
-                Err(io::Error::new(kind, err.message))
+                Err(CaptureReadError::Io(io::Error::new(kind, err.message)))
             }
         }
     }

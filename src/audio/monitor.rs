@@ -71,14 +71,14 @@ impl AudioHealthMonitor {
 
     pub async fn report_recovered(&self) {
         let prev_status = self.status.read().await.clone();
+        self.suppress_display.store(false, Ordering::Relaxed);
 
         if prev_status != AudioHealthStatus::Healthy {
             let retry_count = self.retry_count.load(Ordering::Relaxed);
             info!("Audio recovered after {} retries", retry_count);
 
-            self.suppress_display.store(false, Ordering::Relaxed);
             self.retry_count.store(0, Ordering::Relaxed);
-            self.throttler.clear("audio_");
+            self.throttler.clear_all();
             *self.last_error_code.write().await = None;
             *self.status.write().await = AudioHealthStatus::Healthy;
         }

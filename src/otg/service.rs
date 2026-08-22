@@ -6,9 +6,10 @@ use typeshare::typeshare;
 
 use super::bridge::NetworkBridgeRuntime;
 use super::manager::{wait_for_hid_devices, GadgetDescriptor, OtgGadgetManager};
-use super::msd::MsdFunction;
+use super::msd::{MsdFunction, MsdInquiryStrings, MsdLunConfig};
 use crate::config::{
     HidBackend, HidConfig, MsdConfig, OtgDescriptorConfig, OtgHidFunctions, OtgNetworkConfig,
+    UacConfig,
 };
 use crate::error::{AppError, Result};
 
@@ -61,7 +62,9 @@ pub(crate) struct OtgDesiredState {
     pub keyboard_leds: bool,
     pub msd_enabled: bool,
     pub msd_lun_capacity: u8,
+    pub msd_inquiry_strings: MsdInquiryStrings,
     pub network: OtgNetworkConfig,
+    pub uac: UacConfig,
 }
 
 impl Default for OtgDesiredState {
@@ -73,7 +76,9 @@ impl Default for OtgDesiredState {
             keyboard_leds: false,
             msd_enabled: false,
             msd_lun_capacity: 1,
+            msd_inquiry_strings: MsdInquiryStrings::default(),
             network: OtgNetworkConfig::default(),
+            uac: UacConfig::default(),
         }
     }
 }
@@ -83,8 +88,11 @@ impl OtgDesiredState {
         hid: &HidConfig,
         msd: &MsdConfig,
         network: &OtgNetworkConfig,
+        uac: &UacConfig,
     ) -> Result<Self> {
         network.validate()?;
+        uac.validate()?;
+        msd.validate()?;
         let hid_functions = if hid.backend == HidBackend::Otg {
             let functions = hid.constrained_otg_functions();
             Some(functions)
@@ -93,7 +101,7 @@ impl OtgDesiredState {
         };
 
         hid.validate_otg_functions()?;
-        let needs_udc = hid_functions.is_some() || msd.enabled || network.enabled;
+        let needs_udc = hid_functions.is_some() || msd.enabled || network.enabled || uac.enabled;
         let udc = if needs_udc {
             hid.otg_udc
                 .as_ref()
@@ -110,7 +118,13 @@ impl OtgDesiredState {
             keyboard_leds: hid.effective_otg_keyboard_leds(),
             msd_enabled: msd.enabled,
             msd_lun_capacity: 1,
+            msd_inquiry_strings: MsdInquiryStrings::from(msd),
             network: network.clone(),
+            uac: if uac.enabled {
+                uac.clone()
+            } else {
+                UacConfig::default()
+            },
         })
     }
 
@@ -132,7 +146,9 @@ struct OtgServiceState {
     pub hid_enabled: bool,
     pub msd_enabled: bool,
     pub msd_lun_capacity: u8,
+    pub msd_inquiry_strings: MsdInquiryStrings,
     pub network: OtgNetworkConfig,
+    pub uac: UacConfig,
     pub configured_udc: Option<String>,
     pub hid_paths: Option<HidDevicePaths>,
     pub hid_functions: Option<OtgHidFunctions>,
@@ -149,7 +165,9 @@ impl Default for OtgServiceState {
             hid_enabled: false,
             msd_enabled: false,
             msd_lun_capacity: 1,
+            msd_inquiry_strings: MsdInquiryStrings::default(),
             network: OtgNetworkConfig::default(),
+            uac: UacConfig::default(),
             configured_udc: None,
             hid_paths: None,
             hid_functions: None,
@@ -202,6 +220,27 @@ impl OtgService {
         self.desired.read().await.msd_lun_capacity
     }
 
+    pub async fn configure_msd_lun(&self, lun: u8, config: &MsdLunConfig) -> Result<()> {
+        // Keep the manager locked across a possible UDC rebind so an OTG
+        // reconcile cannot replace the gadget halfway through the media-type
+        // transition.
+        let manager = self.manager.lock().await;
+        let gadget_path = manager
+            .as_ref()
+            .map(|value| value.gadget_path().clone())
+            .ok_or_else(|| AppError::Internal("OTG gadget is not active".to_string()))?;
+        let function = self
+            .msd_function
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| AppError::Internal("MSD function is not active".to_string()))?;
+
+        function
+            .configure_lun_async(&gadget_path, lun, config)
+            .await
+    }
+
     pub async fn network_status(&self) -> OtgNetworkStatus {
         let state = self.state.read().await;
         OtgNetworkStatus {
@@ -215,6 +254,7 @@ impl OtgService {
         hid: &HidConfig,
         msd: &MsdConfig,
         network: &OtgNetworkConfig,
+        uac: &UacConfig,
     ) -> Result<()> {
         if !self.recovery_checked.load(Ordering::SeqCst) {
             if let Err(error) = NetworkBridgeRuntime::recover_stale_transaction() {
@@ -226,7 +266,7 @@ impl OtgService {
         }
         let previous = self.desired.read().await.clone();
         let desired = self
-            .desired_from_config_preserving_runtime(hid, msd, network)
+            .desired_from_config_preserving_runtime(hid, msd, network, uac)
             .await?;
         {
             let mut state = self.state.write().await;
@@ -269,8 +309,9 @@ impl OtgService {
         hid: &HidConfig,
         msd: &MsdConfig,
         network: &OtgNetworkConfig,
+        uac: &UacConfig,
     ) -> Result<OtgDesiredState> {
-        let mut desired = OtgDesiredState::from_config(hid, msd, network)?;
+        let mut desired = OtgDesiredState::from_config(hid, msd, network, uac)?;
         desired.msd_lun_capacity = self.desired.read().await.msd_lun_capacity;
         Ok(desired)
     }
@@ -305,10 +346,11 @@ impl OtgService {
         let desired = self.desired.read().await.clone();
 
         debug!(
-            "Reconciling OTG gadget: HID={}, MSD={}, NET={}, UDC={:?}",
+            "Reconciling OTG gadget: HID={}, MSD={}, NET={}, UAC={}, UDC={:?}",
             desired.hid_enabled(),
             desired.msd_enabled,
             desired.network_enabled(),
+            desired.uac.enabled,
             desired.udc
         );
 
@@ -319,7 +361,9 @@ impl OtgService {
                 && state.hid_enabled == desired.hid_enabled()
                 && state.msd_enabled == desired.msd_enabled
                 && state.msd_lun_capacity == desired.msd_lun_capacity
+                && state.msd_inquiry_strings == desired.msd_inquiry_strings
                 && state.network == desired.network
+                && state.uac == desired.uac
                 && state.configured_udc == desired.udc
                 && state.hid_functions == desired.hid_functions
                 && state.keyboard_leds_enabled == desired.keyboard_leds
@@ -358,7 +402,9 @@ impl OtgService {
             state.hid_enabled = false;
             state.msd_enabled = false;
             state.msd_lun_capacity = 1;
+            state.msd_inquiry_strings = MsdInquiryStrings::default();
             state.network = OtgNetworkConfig::default();
+            state.uac = UacConfig::default();
             state.configured_udc = None;
             state.hid_paths = None;
             state.hid_functions = None;
@@ -367,7 +413,11 @@ impl OtgService {
             state.error = None;
         }
 
-        if !desired.hid_enabled() && !desired.msd_enabled && !desired.network_enabled() {
+        if !desired.hid_enabled()
+            && !desired.msd_enabled
+            && !desired.network_enabled()
+            && !desired.uac.enabled
+        {
             info!("OTG desired state is empty, gadget removed");
             return Ok(());
         }
@@ -393,6 +443,20 @@ impl OtgService {
         );
 
         let mut hid_paths = None;
+        // Add UAC BEFORE HID so the isochronous endpoint gets a
+        // lower hardware endpoint number.  DWC3 seems to have
+        // trouble with isochronous transfers on higher-numbered
+        // endpoints when they follow interrupt endpoints.
+        let _uac_func = if desired.uac.enabled {
+            Some(
+                manager
+                    .add_uac(desired.uac.sample_rate, desired.uac.channels)
+                    .map_err(|e| AppError::Internal(format!("Failed to add UAC function: {e}")))?,
+            )
+        } else {
+            None
+        };
+
         if let Some(hid_functions) = desired.hid_functions.clone() {
             let mut paths = HidDevicePaths {
                 udc: Some(udc.clone()),
@@ -449,7 +513,10 @@ impl OtgService {
         }
 
         let msd_func = if desired.msd_enabled {
-            match manager.add_msd(desired.msd_lun_capacity) {
+            match manager.add_msd(
+                desired.msd_lun_capacity,
+                desired.msd_inquiry_strings.clone(),
+            ) {
                 Ok(func) => {
                     debug!("MSD function added to gadget");
                     Some(func)
@@ -536,7 +603,9 @@ impl OtgService {
             state.hid_enabled = desired.hid_enabled();
             state.msd_enabled = desired.msd_enabled;
             state.msd_lun_capacity = desired.msd_lun_capacity;
+            state.msd_inquiry_strings = desired.msd_inquiry_strings.clone();
             state.network = desired.network.clone();
+            state.uac = desired.uac.clone();
             state.configured_udc = Some(udc);
             state.hid_paths = hid_paths;
             state.hid_functions = desired.hid_functions;
@@ -642,6 +711,7 @@ mod tests {
                 &HidConfig::default(),
                 &MsdConfig::default(),
                 &OtgNetworkConfig::default(),
+                &UacConfig::default(),
             )
             .await
             .unwrap();
@@ -655,6 +725,14 @@ mod tests {
         let mut multi = single.clone();
         multi.msd_lun_capacity = 8;
         assert_ne!(single, multi);
+    }
+
+    #[test]
+    fn inquiry_strings_participate_in_desired_state_equality() {
+        let original = OtgDesiredState::default();
+        let mut changed = original.clone();
+        changed.msd_inquiry_strings.flash = "Custom Flash".to_string();
+        assert_ne!(original, changed);
     }
 
     #[test]
@@ -673,7 +751,8 @@ mod tests {
             ..OtgNetworkConfig::default()
         };
 
-        let desired = OtgDesiredState::from_config(&hid, &msd, &network).unwrap();
+        let desired =
+            OtgDesiredState::from_config(&hid, &msd, &network, &UacConfig::default()).unwrap();
 
         assert_eq!(desired.udc.as_deref(), Some("c9040000.usb"));
         assert_eq!(desired.hid_functions, Some(OtgHidFunctions::full()));

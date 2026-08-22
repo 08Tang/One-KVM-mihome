@@ -276,7 +276,6 @@ impl RustDeskService {
             },
         ));
 
-        let status = self.status.clone();
         let handle = tokio::spawn(async move {
             loop {
                 match mediator.start().await {
@@ -286,9 +285,7 @@ impl RustDeskService {
                     }
                     Err(e) => {
                         error!("Rendezvous mediator error: {}", e);
-                        *status.write() = ServiceStatus::Error(e.to_string());
                         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                        *status.write() = ServiceStatus::Starting;
                     }
                 }
             }

@@ -350,14 +350,15 @@ watch(() => props.open, (isOpen) => {
               <SelectTrigger size="sm" class="w-full text-xs">
                 <SelectValue :placeholder="t('actionbar.selectDevice')" />
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent class="max-w-[min(360px,calc(100vw-2rem))]">
                 <SelectItem
                   v-for="device in availableDevicePaths"
                   :key="device.path"
                   :value="device.path"
+                  :text-value="device.name"
                   class="text-xs"
                 >
-                  {{ device.name }}
+                  <span class="block min-w-0 truncate" :title="device.name">{{ device.name }}</span>
                 </SelectItem>
               </SelectContent>
             </Select>

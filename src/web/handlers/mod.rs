@@ -41,7 +41,7 @@ use axum::{
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use self::config::apply::ConfigApplyOptions;
 use crate::auth::{Session, SESSION_COOKIE};

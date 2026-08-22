@@ -19,6 +19,10 @@ RUN sed -i 's/ main$/ main contrib non-free/' /etc/apt/sources.list && \
         ca-certificates \
         libudev1 \
         libasound2 \
+        # OTG Ethernet bridge control (nmcli talks to the host NetworkManager over D-Bus)
+        network-manager \
+        iproute2 \
+        iputils-ping \
         # v4l2 is handled by kernel, minimal userspace needed
         libv4l-0 \
         && \

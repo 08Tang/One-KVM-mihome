@@ -529,8 +529,8 @@ onUnmounted(() => {
               <Item variant="muted" size="sm"><ItemContent><ItemDescription>{{ t('stats.connectionType') }}</ItemDescription><ItemTitle class="flex items-center gap-1.5">
                   <span
                     :class="[
-                      'inline-block w-2 h-2 rounded-full',
-                      currentStats.isRelay ? 'bg-warning' : 'bg-success'
+                      'inline-block size-2 rounded-full',
+                      currentStats.isRelay ? 'bg-warning' : 'bg-status-active'
                     ]"
                   />
                   {{ currentStats.isRelay ? t('stats.relay') : t('stats.p2p') }}

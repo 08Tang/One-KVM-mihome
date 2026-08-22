@@ -67,8 +67,14 @@ struct BridgeJournal {
     existing_bridge: bool,
     original_connection_uuid: Option<String>,
     bridge_profile_uuid: Option<String>,
+    #[serde(default)]
+    bridge_profile_name: Option<String>,
     uplink_profile_uuid: Option<String>,
+    #[serde(default)]
+    uplink_profile_name: Option<String>,
     usb_profile_uuid: String,
+    #[serde(default)]
+    usb_profile_name: Option<String>,
 }
 
 #[derive(Debug)]
@@ -87,11 +93,11 @@ impl TransactionProfiles {
         let suffix = &transaction[..12];
         Self {
             bridge_name: format!("{PROFILE_PREFIX}-bridge-{suffix}"),
-            bridge_uuid: Uuid::new_v4().to_string(),
+            bridge_uuid: String::new(),
             uplink_name: format!("{PROFILE_PREFIX}-uplink-{suffix}"),
-            uplink_uuid: Uuid::new_v4().to_string(),
+            uplink_uuid: String::new(),
             usb_name: format!("{PROFILE_PREFIX}-usb-{suffix}"),
-            usb_uuid: Uuid::new_v4().to_string(),
+            usb_uuid: String::new(),
         }
     }
 }
@@ -151,15 +157,18 @@ impl NetworkBridgeRuntime {
             .trim()
             .to_string();
 
-        let profiles = TransactionProfiles::new();
-        let journal = BridgeJournal {
+        let mut profiles = TransactionProfiles::new();
+        let mut journal = BridgeJournal {
             version: JOURNAL_VERSION,
             uplink: uplink.to_string(),
             existing_bridge: false,
             original_connection_uuid: Some(original_connection_uuid.clone()),
-            bridge_profile_uuid: Some(profiles.bridge_uuid.clone()),
-            uplink_profile_uuid: Some(profiles.uplink_uuid.clone()),
-            usb_profile_uuid: profiles.usb_uuid.clone(),
+            bridge_profile_uuid: None,
+            bridge_profile_name: Some(profiles.bridge_name.clone()),
+            uplink_profile_uuid: None,
+            uplink_profile_name: Some(profiles.uplink_name.clone()),
+            usb_profile_uuid: String::new(),
+            usb_profile_name: Some(profiles.usb_name.clone()),
         };
         write_journal(&journal)?;
 
@@ -174,9 +183,10 @@ impl NetworkBridgeRuntime {
                 BRIDGE_IF,
                 "con-name",
                 &profiles.bridge_name,
-                "connection.uuid",
-                &profiles.bridge_uuid,
             ])?;
+            profiles.bridge_uuid = connection_value(&profiles.bridge_name, "connection.uuid")?;
+            journal.bridge_profile_uuid = Some(profiles.bridge_uuid.clone());
+            write_journal(&journal)?;
             run_nmcli(&[
                 "connection",
                 "modify",
@@ -220,8 +230,6 @@ impl NetworkBridgeRuntime {
                 uplink,
                 "con-name",
                 &profiles.uplink_name,
-                "connection.uuid",
-                &profiles.uplink_uuid,
                 "master",
                 BRIDGE_IF,
                 "slave-type",
@@ -229,6 +237,9 @@ impl NetworkBridgeRuntime {
                 "connection.autoconnect",
                 "no",
             ])?;
+            profiles.uplink_uuid = connection_value(&profiles.uplink_name, "connection.uuid")?;
+            journal.uplink_profile_uuid = Some(profiles.uplink_uuid.clone());
+            write_journal(&journal)?;
             run_nmcli(&[
                 "connection",
                 "add",
@@ -238,8 +249,6 @@ impl NetworkBridgeRuntime {
                 usb_interface,
                 "con-name",
                 &profiles.usb_name,
-                "connection.uuid",
-                &profiles.usb_uuid,
                 "master",
                 BRIDGE_IF,
                 "slave-type",
@@ -247,6 +256,9 @@ impl NetworkBridgeRuntime {
                 "connection.autoconnect",
                 "no",
             ])?;
+            profiles.usb_uuid = connection_value(&profiles.usb_name, "connection.uuid")?;
+            journal.usb_profile_uuid = profiles.usb_uuid.clone();
+            write_journal(&journal)?;
             Ok(())
         })();
         if let Err(error) = prepare_result {
@@ -449,17 +461,27 @@ fn select_bridge_candidate<'a>(
 
 fn restore_from_journal(journal: &BridgeJournal) -> Result<()> {
     let mut errors = Vec::new();
-    for (kind, profile_uuid) in [
-        ("USB", Some(journal.usb_profile_uuid.as_str())),
-        ("uplink", journal.uplink_profile_uuid.as_deref()),
-        ("bridge", journal.bridge_profile_uuid.as_deref()),
+    for (kind, profile_uuid, profile_name) in [
+        (
+            "USB",
+            (!journal.usb_profile_uuid.is_empty()).then_some(journal.usb_profile_uuid.as_str()),
+            journal.usb_profile_name.as_deref(),
+        ),
+        (
+            "uplink",
+            journal.uplink_profile_uuid.as_deref(),
+            journal.uplink_profile_name.as_deref(),
+        ),
+        (
+            "bridge",
+            journal.bridge_profile_uuid.as_deref(),
+            journal.bridge_profile_name.as_deref(),
+        ),
     ] {
-        let Some(profile_uuid) = profile_uuid else {
-            continue;
-        };
-        if let Err(error) = delete_connection(profile_uuid) {
+        if let Err(error) = delete_owned_connection(profile_uuid, profile_name) {
+            let profile = profile_uuid.or(profile_name).unwrap_or("unknown");
             errors.push(format!(
-                "failed to remove owned {kind} profile {profile_uuid}: {error}"
+                "failed to remove owned {kind} profile {profile}: {error}"
             ));
         }
     }
@@ -627,12 +649,23 @@ fn connection_uuids() -> Result<Vec<String>> {
         .collect())
 }
 
-fn delete_connection(profile_uuid: &str) -> Result<()> {
-    if !connection_uuids()?.iter().any(|uuid| uuid == profile_uuid) {
+fn delete_owned_connection(profile_uuid: Option<&str>, profile_name: Option<&str>) -> Result<()> {
+    if let Some(profile_uuid) = profile_uuid {
+        if connection_uuids()?.iter().any(|uuid| uuid == profile_uuid) {
+            return run_nmcli(&["connection", "delete", "uuid", profile_uuid]).map(|_| ());
+        }
+    }
+    let Some(profile_name) = profile_name else {
+        return Ok(());
+    };
+    let output = run_nmcli(&["-t", "--escape", "no", "-f", "NAME", "connection", "show"])?;
+    if !String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|name| name == profile_name)
+    {
         return Ok(());
     }
-    run_nmcli(&["connection", "delete", "uuid", profile_uuid])?;
-    Ok(())
+    run_nmcli(&["connection", "delete", "id", profile_name]).map(|_| ())
 }
 
 fn copy_connection_properties(source: &str, target: &str, properties: &[&str]) -> Result<()> {
@@ -834,8 +867,11 @@ mod tests {
             existing_bridge: false,
             original_connection_uuid: Some("original-uuid".to_string()),
             bridge_profile_uuid: Some("bridge-uuid".to_string()),
+            bridge_profile_name: Some("bridge-name".to_string()),
             uplink_profile_uuid: Some("uplink-uuid".to_string()),
+            uplink_profile_name: Some("uplink-name".to_string()),
             usb_profile_uuid: "usb-uuid".to_string(),
+            usb_profile_name: Some("usb-name".to_string()),
         };
         let value = serde_json::to_string(&journal).unwrap();
         let decoded: BridgeJournal = serde_json::from_str(&value).unwrap();
@@ -844,13 +880,31 @@ mod tests {
     }
 
     #[test]
-    fn transaction_profiles_use_unique_names_and_uuids() {
+    fn bridge_journal_accepts_legacy_entries_without_profile_names() {
+        let value = r#"{
+            "version": 2,
+            "uplink": "eth0",
+            "existing_bridge": false,
+            "original_connection_uuid": "original-uuid",
+            "bridge_profile_uuid": "bridge-uuid",
+            "uplink_profile_uuid": "uplink-uuid",
+            "usb_profile_uuid": "usb-uuid"
+        }"#;
+        let decoded: BridgeJournal = serde_json::from_str(value).unwrap();
+        assert_eq!(decoded.bridge_profile_name, None);
+        assert_eq!(decoded.uplink_profile_name, None);
+        assert_eq!(decoded.usb_profile_name, None);
+    }
+
+    #[test]
+    fn transaction_profiles_use_unique_names() {
         let first = TransactionProfiles::new();
         let second = TransactionProfiles::new();
         assert_ne!(first.bridge_name, second.bridge_name);
-        assert_ne!(first.bridge_uuid, second.bridge_uuid);
         assert!(first.usb_name.starts_with(PROFILE_PREFIX));
-        assert!(Uuid::parse_str(&first.usb_uuid).is_ok());
+        assert!(first.bridge_uuid.is_empty());
+        assert!(first.uplink_uuid.is_empty());
+        assert!(first.usb_uuid.is_empty());
     }
 
     #[test]

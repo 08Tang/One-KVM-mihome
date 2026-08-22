@@ -4,76 +4,19 @@ use axum::{
 };
 use serde::Deserialize;
 use std::sync::Arc;
-use toml_edit::DocumentMut;
 use typeshare::typeshare;
 
 use crate::error::{AppError, Result};
 use crate::extensions::{
-    EasytierConfig, EasytierInfo, ExtensionId, ExtensionInfo, ExtensionLogs, ExtensionsStatus,
-    FrpProxyType, FrpcConfig, FrpcConfigMode, FrpcInfo, GostcConfig, GostcInfo, TtydConfig,
-    TtydInfo,
+    validate_easytier_config, validate_extension_config, validate_frpc_config,
+    validate_gostc_config, EasytierConfig, EasytierConfigMode, EasytierInfo, ExtensionId,
+    ExtensionInfo, ExtensionLogs, ExtensionsStatus, FrpProxyType, FrpcConfig, FrpcConfigMode,
+    FrpcInfo, GostcConfig, GostcInfo, TtydConfig, TtydInfo,
 };
 use crate::state::AppState;
 
-fn validate_gostc_enabled(config: &GostcConfig) -> Result<()> {
-    if config.addr.trim().is_empty() {
-        return Err(AppError::BadRequest(
-            "GOSTC server address is required".into(),
-        ));
-    }
-    if config.key.is_empty() {
-        return Err(AppError::BadRequest("GOSTC client key is required".into()));
-    }
-    Ok(())
-}
-
-fn validate_easytier_enabled(config: &EasytierConfig) -> Result<()> {
-    if config.network_name.trim().is_empty() {
-        return Err(AppError::BadRequest(
-            "EasyTier network name is required".into(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_frpc_enabled(config: &FrpcConfig) -> Result<()> {
-    match config.config_mode {
-        FrpcConfigMode::Quick => {
-            if config.proxy_name.trim().is_empty() {
-                return Err(AppError::BadRequest("FRPC proxy name is required".into()));
-            }
-            if config.server_addr.trim().is_empty() {
-                return Err(AppError::BadRequest(
-                    "FRPC server address is required".into(),
-                ));
-            }
-            if config.token.is_empty() {
-                return Err(AppError::BadRequest("FRPC token is required".into()));
-            }
-            if config.local_ip.trim().is_empty() {
-                return Err(AppError::BadRequest("FRPC local IP is required".into()));
-            }
-            if matches!(config.proxy_type, FrpProxyType::Tcp | FrpProxyType::Udp)
-                && config.remote_port.is_none()
-            {
-                return Err(AppError::BadRequest(
-                    "FRPC remote port is required for TCP/UDP proxies".into(),
-                ));
-            }
-        }
-        FrpcConfigMode::Full => {
-            let toml = config.custom_toml.trim();
-            if toml.is_empty() {
-                return Err(AppError::BadRequest(
-                    "FRPC full configuration is required".into(),
-                ));
-            }
-            toml.parse::<DocumentMut>().map_err(|e| {
-                AppError::BadRequest(format!("FRPC full configuration is not valid TOML: {}", e))
-            })?;
-        }
-    }
-    Ok(())
+fn bad_request(validation: std::result::Result<(), String>) -> Result<()> {
+    validation.map_err(AppError::BadRequest)
 }
 
 pub async fn list_extensions(State(state): State<Arc<AppState>>) -> Json<ExtensionsStatus> {
@@ -130,6 +73,8 @@ pub async fn start_extension(
 
     let config = state.config.get();
     let mgr = &state.extensions;
+
+    bad_request(validate_extension_config(ext_id, &config.extensions))?;
 
     mgr.start(ext_id, &config.extensions)
         .await
@@ -200,10 +145,12 @@ pub struct GostcConfigUpdate {
 #[derive(Debug, Deserialize)]
 pub struct EasytierConfigUpdate {
     pub enabled: Option<bool>,
+    pub config_mode: Option<EasytierConfigMode>,
     pub network_name: Option<String>,
     pub network_secret: Option<String>,
     pub peer_urls: Option<Vec<String>>,
     pub virtual_ip: Option<String>,
+    pub custom_toml: Option<String>,
 }
 
 #[typeshare]
@@ -284,7 +231,7 @@ pub async fn update_gostc_config(
     }
 
     if next_gostc.enabled {
-        validate_gostc_enabled(&next_gostc)?;
+        bad_request(validate_gostc_config(&next_gostc))?;
     }
 
     state
@@ -321,6 +268,9 @@ pub async fn update_easytier_config(
     if let Some(enabled) = req.enabled {
         next_easytier.enabled = enabled;
     }
+    if let Some(config_mode) = req.config_mode {
+        next_easytier.config_mode = config_mode;
+    }
     if let Some(ref name) = req.network_name {
         next_easytier.network_name = name.clone();
     }
@@ -333,9 +283,12 @@ pub async fn update_easytier_config(
     if req.virtual_ip.is_some() {
         next_easytier.virtual_ip = req.virtual_ip.clone();
     }
+    if let Some(ref custom_toml) = req.custom_toml {
+        next_easytier.custom_toml = custom_toml.clone();
+    }
 
-    if next_easytier.enabled {
-        validate_easytier_enabled(&next_easytier)?;
+    if next_easytier.enabled || matches!(next_easytier.config_mode, EasytierConfigMode::Full) {
+        bad_request(validate_easytier_config(&next_easytier))?;
     }
 
     state
@@ -414,7 +367,7 @@ pub async fn update_frpc_config(
     }
 
     if next_frpc.enabled || matches!(next_frpc.config_mode, FrpcConfigMode::Full) {
-        validate_frpc_enabled(&next_frpc)?;
+        bad_request(validate_frpc_config(&next_frpc))?;
     }
 
     state

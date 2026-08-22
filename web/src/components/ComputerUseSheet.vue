@@ -3,7 +3,7 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import {
   Bot,
-  BrainCircuit,
+  Brain,
   ChevronDown,
   ChevronRight,
   Image,
@@ -293,7 +293,7 @@ onMounted(loadConfig)
               >
                 <ChevronDown v-if="reasoningOpen(item)" class="size-3.5 shrink-0" />
                 <ChevronRight v-else class="size-3.5 shrink-0" />
-                <BrainCircuit class="size-3.5 shrink-0" />
+                <Brain class="size-3.5 shrink-0" />
                 <span>
                   {{ item.failed
                     ? t('computerUse.reasoning.failed')

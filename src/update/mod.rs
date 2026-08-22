@@ -110,13 +110,12 @@ pub struct UpdateStatusResponse {
 pub struct UpdateService {
     client: reqwest::Client,
     base_url: String,
-    work_dir: PathBuf,
     status: RwLock<UpdateStatusResponse>,
     upgrade_permit: Arc<Semaphore>,
 }
 
 impl UpdateService {
-    pub fn new(work_dir: PathBuf) -> Self {
+    pub fn new() -> Self {
         let base_url = std::env::var("ONE_KVM_UPDATE_BASE_URL")
             .ok()
             .filter(|url| !url.trim().is_empty())
@@ -125,7 +124,6 @@ impl UpdateService {
         Self {
             client: reqwest::Client::new(),
             base_url,
-            work_dir,
             status: RwLock::new(UpdateStatusResponse {
                 success: true,
                 phase: UpdatePhase::Idle,
@@ -289,10 +287,13 @@ impl UpdateService {
         )
         .await;
 
-        tokio::fs::create_dir_all(&self.work_dir).await?;
-        let staging_path = self
-            .work_dir
-            .join(format!("one-kvm-{}-download", target_version));
+        let download_dir = tempfile::Builder::new()
+            .prefix("one-kvm-update-")
+            .tempdir()
+            .map_err(|e| {
+                AppError::Internal(format!("Failed to create update temp directory: {}", e))
+            })?;
+        let staging_path = download_dir.path().join("tmpfile");
 
         let artifact_url = self.resolve_url(&artifact.url);
         self.download_and_verify(&artifact_url, &staging_path, &artifact)
@@ -308,6 +309,7 @@ impl UpdateService {
         .await;
 
         let restart_exe = self.install_binary(&staging_path).await?;
+        drop(download_dir);
 
         self.set_status(
             UpdatePhase::Restarting,

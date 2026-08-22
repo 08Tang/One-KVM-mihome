@@ -276,6 +276,24 @@ class DeviceSelector:
         return None
 
     @staticmethod
+    def _pick_required_mode(
+        fmt: dict[str, Any] | None,
+        width: int,
+        height: int,
+        fps: float,
+    ) -> tuple[int, int, float] | None:
+        if not fmt:
+            return None
+        for res in fmt.get("resolutions", []):
+            if int(res.get("width", 0)) != width or int(res.get("height", 0)) != height:
+                continue
+            for advertised_fps in res.get("fps", []):
+                value = float(advertised_fps)
+                if abs(value - fps) <= 0.05:
+                    return width, height, value
+        return None
+
+    @staticmethod
     def _pick_highest_1080(fmt: dict[str, Any]) -> tuple[int, int, float] | None:
         candidates: list[tuple[int, int, float]] = []
         for res in fmt.get("resolutions", []):
@@ -288,6 +306,22 @@ class DeviceSelector:
         if not candidates:
             return None
         return max(candidates, key=lambda x: (x[0] * x[1], x[2]))
+
+    @staticmethod
+    def _pick_highest_fps_at_resolution(
+        fmt: dict[str, Any] | None,
+        width: int,
+        height: int,
+    ) -> tuple[int, int, float] | None:
+        if not fmt:
+            return None
+        candidates: list[float] = []
+        for res in fmt.get("resolutions", []):
+            if int(res.get("width", 0)) == width and int(res.get("height", 0)) == height:
+                candidates.extend(float(value) for value in res.get("fps", []))
+        if not candidates:
+            return None
+        return width, height, max(candidates)
 
     def select(self) -> list[VideoInputCase]:
         video_devices = self.devices.get("video", [])
@@ -310,17 +344,36 @@ class DeviceSelector:
 
         mjpeg = self._find_format(device, "MJPEG")
         yuyv = self._find_format(device, "YUYV")
-        target_fps = 60 if input_class == "usb3" else 30
+        if input_class == "usb2":
+            required_modes = (
+                ("MJPEG", mjpeg, 50.0, "usb2_mjpeg"),
+                ("YUYV", yuyv, 10.0, "usb2_yuyv"),
+            )
+            missing: list[str] = []
+            for fmt_name, fmt_info, required_fps, label in required_modes:
+                picked = self._pick_required_mode(fmt_info, 1920, 1080, required_fps)
+                if not picked:
+                    missing.append(f"{fmt_name} 1920x1080@{required_fps:g}fps")
+                    continue
+                width, height, fps = picked
+                cases.append(VideoInputCase(label, input_class, path, fmt_name, width, height, fps))
+            if missing:
+                raise RuntimeError(
+                    "USB 2.0 capture card is missing required mode(s): " + ", ".join(missing)
+                )
+            return cases
+
+        target_fps = 60
         if mjpeg:
             picked = self._pick_exact(mjpeg, 1920, 1080, target_fps) or self._pick_highest_1080(mjpeg)
             if picked:
                 w, h, f = picked
                 cases.append(VideoInputCase(f"{input_class}_mjpeg", input_class, path, "MJPEG", w, h, f))
-        if yuyv:
-            picked = self._pick_highest_1080(yuyv)
-            if picked:
-                w, h, f = picked
-                cases.append(VideoInputCase(f"{input_class}_yuyv", input_class, path, "YUYV", w, h, f))
+        picked = self._pick_highest_fps_at_resolution(yuyv, 1920, 1080)
+        if not picked:
+            raise RuntimeError("USB 3.0 capture card is missing required mode: YUYV 1920x1080")
+        w, h, f = picked
+        cases.append(VideoInputCase("usb3_yuyv", input_class, path, "YUYV", w, h, f))
         return cases
 
 
@@ -597,7 +650,16 @@ echo "$BACKUP"
 
     def select_video_cases(self, devices: dict[str, Any]) -> list[VideoInputCase]:
         selector = DeviceSelector(self.lsusb_tree, devices)
-        cases = selector.select()
+        try:
+            cases = selector.select()
+        except RuntimeError as exc:
+            self.reporter.add(
+                "video_input_select",
+                "FAIL",
+                str(exc),
+                devices=devices.get("video", []),
+            )
+            raise
         if not cases:
             self.reporter.add("video_input_select", "FAIL", "no suitable video input case found", devices=devices.get("video", []))
             return []
@@ -692,7 +754,6 @@ echo "$BACKUP"
                     )
                     continue
                 try:
-                    self.apply_video_case(case)
                     if output_mode == "mjpeg":
                         motion_started = await self.start_mjpeg_motion()
                         try:
@@ -796,6 +857,9 @@ echo "$BACKUP"
                 "quality": self.args.jpeg_quality,
             },
         )
+        settle_seconds = max(0.0, float(self.args.video_config_settle_seconds))
+        if settle_seconds > 0:
+            time.sleep(settle_seconds)
 
     def configure_video_case(self, case: VideoInputCase) -> None:
         self.apply_video_case(case)
@@ -818,7 +882,7 @@ echo "$BACKUP"
         frame_count = 0
         byte_count = 0
         first_frame_s: float | None = None
-        for frame, frame_time, _ in self.iter_mjpeg_frames(client_id, timeout=self.args.sample_seconds, video_case=case):
+        for frame, frame_time, _ in self.iter_mjpeg_frames(client_id, timeout=self.args.sample_seconds):
             now = time.monotonic()
             if now >= deadline:
                 break
@@ -855,6 +919,7 @@ echo "$BACKUP"
 
     async def measure_webrtc(self, case: VideoInputCase, codec: str) -> dict[str, Any]:
         self.set_stream_mode(codec)
+        self.apply_video_case(case)
         try:
             from playwright.async_api import async_playwright
         except ImportError:
@@ -885,7 +950,13 @@ echo "$BACKUP"
             try:
                 page = await context.new_page()
                 await page.goto(self.api.base)
-                result = await page.evaluate(js, {"seconds": self.args.sample_seconds})
+                result = await page.evaluate(
+                    js,
+                    {
+                        "seconds": self.args.sample_seconds,
+                        "settleSeconds": max(0.0, float(self.args.video_config_settle_seconds)),
+                    },
+                )
             except Exception as exc:
                 text = str(exc)
                 if codec == "h265" and is_webrtc_codec_unsupported_error(text):
@@ -988,7 +1059,6 @@ echo "$BACKUP"
                     )
                     continue
                 try:
-                    self.apply_video_case(latency_case)
                     if output_mode == "mjpeg":
                         await self.run_mjpeg_latency_test(latency_case, check_name=check_name, save_evidence=False)
                     else:
@@ -1010,17 +1080,8 @@ echo "$BACKUP"
         return cases[0]
 
     def configure_hdmi_probe_case(self, case: VideoInputCase) -> None:
-        self.api.patch(
-            "/config/video",
-            {
-                "device": case.device,
-                "format": case.fmt,
-                "width": case.width,
-                "height": case.height,
-                "fps": int(round(case.fps)),
-                "quality": self.args.jpeg_quality,
-            },
-        )
+        self.set_stream_mode("mjpeg")
+        self.apply_video_case(case)
         self.reporter.add(
             "config_video_hdmi_probe",
             "PASS",
@@ -1044,7 +1105,6 @@ echo "$BACKUP"
                 evidence_title=f"HDMI 纯色采集帧 {name}",
                 expected_rgb=expected,
                 threshold=self.args.hdmi_color_fail,
-                video_case=case,
             )
             err = rgb_error(expected, stats["mean_rgb"])
             closest_name, closest_error = closest_hdmi_color(stats["mean_rgb"])
@@ -1113,6 +1173,9 @@ echo "$BACKUP"
         if self.args.hdmi_latency_trials <= 0:
             self.reporter.add(check_name, "SKIP", "video latency trials disabled", video_case=case.__dict__, output_mode="mjpeg")
             return
+        self.set_stream_mode("mjpeg")
+        self.apply_video_case(case)
+        self.api.post("/stream/start", {})
         offset_ns, sync = await self.sync_agent_clock(f"{check_name}_agent_clock_sync_rtt")
         trials: list[dict[str, Any]] = []
         colors = [("#ff0000", "#00ff00"), ("#00ff00", "#0000ff"), ("#0000ff", "#ff0000")]
@@ -1128,7 +1191,6 @@ echo "$BACKUP"
                 timeout=detect_timeout,
                 threshold=self.args.hdmi_color_fail,
                 evidence_title=f"HDMI 延迟命中帧 {case.label} #{i + 1}" if save_evidence else None,
-                video_case=case,
             )
             display = await self.agent.command("display_state", {}, timeout=5)
             actual_agent_ns = int(display.get("last_change_unix_nano") or 0)
@@ -1209,6 +1271,9 @@ echo "$BACKUP"
                 setup = await page.evaluate(WEBRTC_LATENCY_SETUP_JS, {"timeoutMs": 15000})
                 if not setup.get("connected"):
                     raise RuntimeError(f"{output_mode} WebRTC did not connect: {setup}")
+                settle_seconds = max(0.0, float(self.args.video_config_settle_seconds))
+                if settle_seconds > 0:
+                    await page.wait_for_timeout(settle_seconds * 1000)
                 for i in range(self.args.hdmi_latency_trials):
                     source, target = colors[i % len(colors)]
                     await self.agent.command("show", {"color": source, "full": True}, timeout=5)
@@ -1313,7 +1378,6 @@ echo "$BACKUP"
         evidence_title: str | None = None,
         expected_rgb: tuple[int, int, int] | None = None,
         threshold: float | None = None,
-        video_case: VideoInputCase | None = None,
     ) -> dict[str, Any]:
         threshold = self.args.hdmi_color_fail if threshold is None else threshold
         required_matches = max(1, int(self.args.hdmi_match_frames))
@@ -1324,7 +1388,7 @@ echo "$BACKUP"
         consecutive_matches = 0
         frames_seen = 0
 
-        for frame, _, wall_ns in self.iter_mjpeg_frames(client_label, timeout, video_case=video_case):
+        for frame, _, wall_ns in self.iter_mjpeg_frames(client_label, timeout):
             frames_seen += 1
             stats = jpeg_rgb_stats(frame)
             stats["wall_ns"] = wall_ns
@@ -1370,12 +1434,11 @@ echo "$BACKUP"
         timeout: float,
         threshold: float,
         evidence_title: str | None = None,
-        video_case: VideoInputCase | None = None,
     ) -> dict[str, Any]:
         last: dict[str, Any] | None = None
         last_frame: bytes | None = None
         frames_seen = 0
-        for frame, _, wall_ns in self.iter_mjpeg_frames(client_label, timeout, video_case=video_case):
+        for frame, _, wall_ns in self.iter_mjpeg_frames(client_label, timeout):
             frames_seen += 1
             stats = jpeg_rgb_stats(frame)
             err = rgb_error(expected_rgb, stats["mean_rgb"])
@@ -1400,10 +1463,8 @@ echo "$BACKUP"
         path.write_bytes(frame)
         self.reporter.add_evidence("HDMI 采集帧", title, path)
 
-    def iter_mjpeg_frames(self, client_label: str, timeout: float, video_case: VideoInputCase | None = None):
+    def iter_mjpeg_frames(self, client_label: str, timeout: float):
         self.set_stream_mode("mjpeg")
-        if video_case is not None:
-            self.apply_video_case(video_case)
         self.api.post("/stream/start", {})
         client_id = f"test-{self.run_id}-{client_label}"
         url = f"{self.api.base}/api/stream/mjpeg?client_id={client_id}"
@@ -1441,8 +1502,6 @@ echo "$BACKUP"
                     raise
                 time.sleep(0.5)
                 self.set_stream_mode("mjpeg", timeout=10)
-                if video_case is not None:
-                    self.apply_video_case(video_case)
                 self.api.post("/stream/start", {})
 
     async def run_hid_test(self) -> None:
@@ -1834,7 +1893,7 @@ VIDEO_SCREENSHOT_READY_JS = r"""
 
 
 WEBRTC_MEASURE_JS = r"""
-async ({seconds}) => {
+async ({seconds, settleSeconds}) => {
   const api = async (path, opts = {}) => {
     const response = await fetch('/api' + path, {
       credentials: 'include',
@@ -1893,6 +1952,12 @@ async ({seconds}) => {
   while (pc.connectionState !== 'connected' && performance.now() - waitStart < 12000) {
     if (pc.connectionState === 'failed' || pc.connectionState === 'closed') break;
     await new Promise(r => setTimeout(r, 100));
+  }
+
+  // Let capture, encoding, decoding, and browser rendering reach steady state.
+  // Samples collected during this interval are intentionally discarded.
+  if (settleSeconds > 0) {
+    await new Promise(r => setTimeout(r, settleSeconds * 1000));
   }
 
   const samples = [];
@@ -2252,6 +2317,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--network-latency-samples", type=int, default=7, help="controller-to-target network latency samples collected during setup")
     run.add_argument("--network-latency-timeout", type=float, default=3.0, help="per-sample TCP/HTTP latency timeout in seconds")
     run.add_argument("--sample-seconds", type=int, default=30)
+    run.add_argument("--video-config-settle-seconds", type=float, default=3.0, help="idle time after applying video configuration before collecting samples")
     run.add_argument("--jpeg-quality", type=int, default=80)
     run.add_argument("--mjpeg-motion-fps", type=int, default=60, help="Windows agent dynamic source fps used during MJPEG/HTTP tests")
     run.add_argument("--agent-host", default=None, help="Windows agent IP/hostname; omit to skip Windows-side checks")

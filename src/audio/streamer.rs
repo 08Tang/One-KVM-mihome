@@ -2,15 +2,15 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
 use tokio::sync::{broadcast, mpsc, watch, Mutex as AsyncMutex, RwLock};
+use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
-use super::capture::{AudioCapturer, AudioConfig, AudioFrame, CaptureState};
+use super::capture::{AudioCapturer, AudioConfig, CaptureState};
 use super::encoder::{OpusConfig, OpusEncoder, OpusFrame};
 use crate::error::{AppError, Result};
-use bytemuck;
-use bytes::Bytes;
-use std::time::Duration;
 
 /// 48 kHz stereo: 20 ms = 960 × 2 samples (S16LE).
 const OPUS_STEREO_SAMPLES: usize = 960 * 2;
@@ -40,16 +40,6 @@ impl AudioStreamerConfig {
             opus: OpusConfig::default(),
         }
     }
-
-    pub fn with_bitrate(mut self, bitrate: u32) -> Self {
-        self.opus.bitrate = bitrate;
-        self
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct AudioStreamStats {
-    pub subscriber_count: usize,
 }
 
 pub struct AudioStreamer {
@@ -60,6 +50,9 @@ pub struct AudioStreamer {
     encoder: Arc<AsyncMutex<Option<OpusEncoder>>>,
     opus_subscribers: Arc<Mutex<Vec<mpsc::Sender<Arc<OpusFrame>>>>>,
     stop_flag: Arc<AtomicBool>,
+    shutdown_generation: watch::Sender<u64>,
+    lifecycle: AsyncMutex<()>,
+    stream_task: AsyncMutex<Option<JoinHandle<()>>>,
 }
 
 impl AudioStreamer {
@@ -69,6 +62,7 @@ impl AudioStreamer {
 
     pub fn with_config(config: AudioStreamerConfig) -> Self {
         let (state_tx, state_rx) = watch::channel(AudioStreamState::Stopped);
+        let (shutdown_generation, _) = watch::channel(0);
 
         Self {
             config: RwLock::new(config),
@@ -78,6 +72,9 @@ impl AudioStreamer {
             encoder: Arc::new(AsyncMutex::new(None)),
             opus_subscribers: Arc::new(Mutex::new(Vec::new())),
             stop_flag: Arc::new(AtomicBool::new(false)),
+            shutdown_generation,
+            lifecycle: AsyncMutex::new(()),
+            stream_task: AsyncMutex::new(None),
         }
     }
 
@@ -90,7 +87,9 @@ impl AudioStreamer {
     }
 
     pub fn subscribe_opus(&self) -> mpsc::Receiver<Arc<OpusFrame>> {
-        let (tx, rx) = mpsc::channel::<Arc<OpusFrame>>(128);
+        // Keep latency bounded for real-time consumers. Slow receivers lose
+        // new frames instead of accumulating seconds of stale audio.
+        let (tx, rx) = mpsc::channel::<Arc<OpusFrame>>(4);
         self.opus_subscribers.lock().unwrap().push(tx);
         rx
     }
@@ -102,22 +101,6 @@ impl AudioStreamer {
             .iter()
             .filter(|s| !s.is_closed())
             .count()
-    }
-
-    pub fn stats(&self) -> AudioStreamStats {
-        AudioStreamStats {
-            subscriber_count: self.subscriber_count(),
-        }
-    }
-
-    pub async fn set_config(&self, config: AudioStreamerConfig) -> Result<()> {
-        if self.state() != AudioStreamState::Stopped {
-            return Err(AppError::AudioError(
-                "Cannot change config while streaming".to_string(),
-            ));
-        }
-        *self.config.write().await = config;
-        Ok(())
     }
 
     pub async fn set_bitrate(&self, bitrate: u32) -> Result<()> {
@@ -132,9 +115,24 @@ impl AudioStreamer {
     }
 
     pub async fn start(&self) -> Result<()> {
-        if self.state() == AudioStreamState::Running {
+        let _lifecycle = self.lifecycle.lock().await;
+        if matches!(
+            self.state(),
+            AudioStreamState::Starting | AudioStreamState::Running
+        ) {
             return Ok(());
         }
+
+        // Error and stopped states may still own completed task handles. Reap
+        // them before installing a new capture pipeline so restart is a clean
+        // lifecycle transition rather than an overwrite of old resources.
+        if let Some(capturer) = self.capturer.write().await.take() {
+            let _ = capturer.stop().await;
+        }
+        if let Some(task) = self.stream_task.lock().await.take() {
+            let _ = task.await;
+        }
+        *self.encoder.lock().await = None;
 
         let _ = self.state.send(AudioStreamState::Starting);
         self.stop_flag.store(false, Ordering::SeqCst);
@@ -149,13 +147,21 @@ impl AudioStreamer {
             config.opus.bitrate
         );
 
-        let capturer = Arc::new(AudioCapturer::new(config.capture.clone()));
-        *self.capturer.write().await = Some(capturer.clone());
-
-        let encoder = OpusEncoder::new(config.opus.clone())?;
+        let encoder = match OpusEncoder::new(config.opus.clone()) {
+            Ok(encoder) => encoder,
+            Err(error) => {
+                let _ = self.state.send(AudioStreamState::Error);
+                return Err(error);
+            }
+        };
         *self.encoder.lock().await = Some(encoder);
 
-        capturer.start().await?;
+        let capturer = Arc::new(AudioCapturer::new(config.capture.clone()));
+        *self.capturer.write().await = Some(capturer.clone());
+        if let Err(error) = capturer.start().await {
+            self.cleanup_failed_start(&capturer).await;
+            return Err(error);
+        }
 
         let mut capture_state = capturer.state_watch();
         let startup_result = tokio::time::timeout(Duration::from_secs(2), async {
@@ -168,7 +174,7 @@ impl AudioStreamer {
                             "Audio capture failed to start".to_string(),
                         ))
                     }
-                    CaptureState::Stopped => {
+                    CaptureState::Stopped | CaptureState::Starting => {
                         if capture_state.changed().await.is_err() {
                             return Err(AppError::AudioError(
                                 "Audio capture stopped during startup".to_string(),
@@ -183,17 +189,11 @@ impl AudioStreamer {
         match startup_result {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
-                let _ = capturer.stop().await;
-                *self.capturer.write().await = None;
-                *self.encoder.lock().await = None;
-                let _ = self.state.send(AudioStreamState::Error);
+                self.cleanup_failed_start(&capturer).await;
                 return Err(e);
             }
             Err(_) => {
-                let _ = capturer.stop().await;
-                *self.capturer.write().await = None;
-                *self.encoder.lock().await = None;
-                let _ = self.state.send(AudioStreamState::Error);
+                self.cleanup_failed_start(&capturer).await;
                 return Err(AppError::AudioError(
                     "Timed out waiting for audio capture to start".to_string(),
                 ));
@@ -205,22 +205,27 @@ impl AudioStreamer {
         let opus_subscribers = self.opus_subscribers.clone();
         let state = self.state.clone();
         let stop_flag = self.stop_flag.clone();
+        let shutdown_rx = self.shutdown_generation.subscribe();
+        let _ = self.state.send(AudioStreamState::Running);
 
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             Self::stream_task(
                 capturer_for_task,
                 encoder,
                 opus_subscribers,
                 state,
                 stop_flag,
+                shutdown_rx,
             )
             .await;
         });
+        *self.stream_task.lock().await = Some(task);
 
         Ok(())
     }
 
     pub async fn stop(&self) -> Result<()> {
+        let _lifecycle = self.lifecycle.lock().await;
         if self.state() == AudioStreamState::Stopped {
             return Ok(());
         }
@@ -228,9 +233,15 @@ impl AudioStreamer {
         info!("Stopping audio stream");
 
         self.stop_flag.store(true, Ordering::SeqCst);
+        self.shutdown_generation.send_modify(|generation| {
+            *generation = generation.wrapping_add(1);
+        });
 
         if let Some(ref capturer) = *self.capturer.read().await {
             capturer.stop().await?;
+        }
+        if let Some(task) = self.stream_task.lock().await.take() {
+            let _ = task.await;
         }
 
         *self.capturer.write().await = None;
@@ -242,28 +253,26 @@ impl AudioStreamer {
         Ok(())
     }
 
+    async fn cleanup_failed_start(&self, capturer: &AudioCapturer) {
+        let _ = capturer.stop().await;
+        *self.capturer.write().await = None;
+        *self.encoder.lock().await = None;
+        let _ = self.state.send(AudioStreamState::Error);
+    }
+
     pub fn is_running(&self) -> bool {
         self.state() == AudioStreamState::Running
     }
 
-    async fn fanout_opus(
+    fn fanout_opus(
         subscribers: &Arc<Mutex<Vec<mpsc::Sender<Arc<OpusFrame>>>>>,
         frame: Arc<OpusFrame>,
     ) {
-        let txs: Vec<_> = {
-            let g = subscribers.lock().unwrap();
-            if g.is_empty() {
-                return;
-            }
-            g.clone()
-        };
-        for tx in &txs {
-            let _ = tx.send(frame.clone()).await;
-        }
-        if txs.iter().any(|tx| tx.is_closed()) {
-            let mut g = subscribers.lock().unwrap();
-            g.retain(|tx| !tx.is_closed());
-        }
+        let mut subscribers = subscribers.lock().unwrap();
+        subscribers.retain(|subscriber| match subscriber.try_send(frame.clone()) {
+            Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => true,
+            Err(mpsc::error::TrySendError::Closed(_)) => false,
+        });
     }
 
     async fn stream_task(
@@ -272,9 +281,9 @@ impl AudioStreamer {
         opus_subscribers: Arc<Mutex<Vec<mpsc::Sender<Arc<OpusFrame>>>>>,
         state: watch::Sender<AudioStreamState>,
         stop_flag: Arc<AtomicBool>,
+        mut shutdown_rx: watch::Receiver<u64>,
     ) {
         let mut pcm_rx = capturer.subscribe();
-        let _ = state.send(AudioStreamState::Running);
 
         debug!("Audio stream task started (48 kHz stereo → Opus, mpsc fan-out)");
 
@@ -291,8 +300,19 @@ impl AudioStreamer {
                 break;
             }
 
-            let recv_result =
-                tokio::time::timeout(std::time::Duration::from_secs(2), pcm_rx.recv()).await;
+            let recv_result = tokio::select! {
+                biased;
+                changed = shutdown_rx.changed() => {
+                    if changed.is_ok() || stop_flag.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    continue;
+                }
+                result = tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    pcm_rx.recv(),
+                ) => result,
+            };
 
             match recv_result {
                 Ok(Ok(audio_frame)) => {
@@ -316,23 +336,17 @@ impl AudioStreamer {
                     }
 
                     while pending.len() >= OPUS_STEREO_SAMPLES {
-                        let pcm_20ms = Bytes::copy_from_slice(bytemuck::cast_slice(
-                            &pending[..OPUS_STEREO_SAMPLES],
-                        ));
-                        pending.drain(..OPUS_STEREO_SAMPLES);
-
-                        let frame_48k = AudioFrame::new_interleaved(pcm_20ms, 2, 48_000, 0);
-
                         let opus_result = {
                             let mut enc_guard = encoder.lock().await;
                             (*enc_guard)
                                 .as_mut()
-                                .map(|enc| enc.encode_frame(&frame_48k))
+                                .map(|enc| enc.encode(&pending[..OPUS_STEREO_SAMPLES]))
                         };
+                        pending.drain(..OPUS_STEREO_SAMPLES);
 
                         match opus_result {
                             Some(Ok(opus_frame)) => {
-                                Self::fanout_opus(&opus_subscribers, Arc::new(opus_frame)).await;
+                                Self::fanout_opus(&opus_subscribers, Arc::new(opus_frame));
                             }
                             Some(Err(e)) => {
                                 error!("Opus encode error: {}", e);
@@ -365,6 +379,7 @@ impl AudioStreamer {
             let _ = state.send(AudioStreamState::Stopped);
         } else {
             opus_subscribers.lock().unwrap().clear();
+            let _ = capturer.stop().await;
         }
         info!("Audio stream task ended");
     }
@@ -379,6 +394,7 @@ impl Default for AudioStreamer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
 
     #[test]
     fn test_streamer_config_default() {
@@ -397,5 +413,43 @@ mod tests {
     async fn test_streamer_state() {
         let streamer = AudioStreamer::new();
         assert_eq!(streamer.state(), AudioStreamState::Stopped);
+    }
+
+    #[test]
+    fn slow_subscriber_does_not_block_or_grow_unbounded() {
+        let streamer = AudioStreamer::new();
+        let mut receiver = streamer.subscribe_opus();
+        for sequence in 0..20 {
+            AudioStreamer::fanout_opus(
+                &streamer.opus_subscribers,
+                Arc::new(OpusFrame {
+                    data: Bytes::from_static(&[1]),
+                    duration_ms: 20,
+                    sequence,
+                }),
+            );
+        }
+
+        let mut received = 0;
+        while receiver.try_recv().is_ok() {
+            received += 1;
+        }
+        assert_eq!(received, 4);
+    }
+
+    #[test]
+    fn closed_subscriber_is_pruned() {
+        let streamer = AudioStreamer::new();
+        let receiver = streamer.subscribe_opus();
+        drop(receiver);
+        AudioStreamer::fanout_opus(
+            &streamer.opus_subscribers,
+            Arc::new(OpusFrame {
+                data: Bytes::from_static(&[1]),
+                duration_ms: 20,
+                sequence: 0,
+            }),
+        );
+        assert_eq!(streamer.subscriber_count(), 0);
     }
 }

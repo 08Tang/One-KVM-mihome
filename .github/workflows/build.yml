@@ -34,13 +34,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: npm
-          cache-dependency-path: web/package-lock.json
 
       - name: Build frontend
         working-directory: web
         run: |
-          npm ci
+          npm install
           npm run build
 
       - name: Upload frontend dist
@@ -66,8 +64,16 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          # The Docker workflow builds the same targets with the same Cross images.
+          shared-key: linux-cross-release
+          key: ${{ hashFiles('Cross.toml', 'build/cross/Dockerfile.*') }}
+          cache-all-crates: true
+
       - name: Install cross
-        run: cargo install cross --locked
+        run: cargo install cross --version 0.2.5 --locked
 
       - name: Build linux binary
         run: bash build/build-images.sh
@@ -134,6 +140,12 @@ jobs:
           "TURBOJPEG_SOURCE=$env:TURBOJPEG_SOURCE" | Out-File -FilePath $env:GITHUB_ENV -Append
           "TURBOJPEG_LIB_DIR=$env:TURBOJPEG_LIB_DIR" | Out-File -FilePath $env:GITHUB_ENV -Append
           "TURBOJPEG_INCLUDE_DIR=$env:TURBOJPEG_INCLUDE_DIR" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-msvc-release
+          key: ${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
 
       - name: Build Windows exe
         shell: pwsh

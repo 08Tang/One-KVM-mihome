@@ -42,7 +42,6 @@ const (
 	wmChar        = 0x0102
 	wmSysKeyDown  = 0x0104
 	wmSysKeyUp    = 0x0105
-	wmTimer       = 0x0113
 	wmMouseMove   = 0x0200
 	wmLButtonDown = 0x0201
 	wmLButtonUp   = 0x0202
@@ -75,10 +74,11 @@ const (
 	wmAppFocus        = wmApp + 4
 	wmAppDynamicStart = wmApp + 5
 	wmAppDynamicStop  = wmApp + 6
+	wmAppDynamicFrame = wmApp + 7
 
-	dynamicTimerID = 1
-
-	colorWindow = 5
+	colorWindow            = 5
+	dynamicBackgroundColor = 0x00101010
+	dynamicPatchSize       = 384
 
 	driveUnknown   = 0
 	driveNoRootDir = 1
@@ -111,16 +111,17 @@ var (
 	procShowWindow            = user32.NewProc("ShowWindow")
 	procSetForegroundWindow   = user32.NewProc("SetForegroundWindow")
 	procGetSystemMetrics      = user32.NewProc("GetSystemMetrics")
+	procGetDC                 = user32.NewProc("GetDC")
+	procReleaseDC             = user32.NewProc("ReleaseDC")
 	procInvalidateRect        = user32.NewProc("InvalidateRect")
 	procUpdateWindow          = user32.NewProc("UpdateWindow")
-	procSetTimer              = user32.NewProc("SetTimer")
-	procKillTimer             = user32.NewProc("KillTimer")
 	procGetKeyState           = user32.NewProc("GetKeyState")
 	procBeginPaint            = user32.NewProc("BeginPaint")
 	procEndPaint              = user32.NewProc("EndPaint")
 	procFillRect              = user32.NewProc("FillRect")
 	procCreateSolidBrush      = gdi32.NewProc("CreateSolidBrush")
 	procDeleteObject          = gdi32.NewProc("DeleteObject")
+	procGetDeviceCaps         = gdi32.NewProc("GetDeviceCaps")
 	procImmAssociateContext   = imm32.NewProc("ImmAssociateContext")
 	procGetModuleHandleW      = kernel32.NewProc("GetModuleHandleW")
 	procQueryPerformanceCount = kernel32.NewProc("QueryPerformanceCounter")
@@ -192,6 +193,10 @@ type appState struct {
 	dynamicActive       bool
 	dynamicFPS          int
 	dynamicFrame        int64
+	dynamicGeneration   uint64
+	dynamicFramePending bool
+	dynamicStop         chan struct{}
+	dynamicStarted      time.Time
 	events              []hidEvent
 }
 
@@ -519,20 +524,22 @@ func windowProc(hwnd uintptr, message uintptr, wParam, lParam uintptr) uintptr {
 		hdc, _, _ := procBeginPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
 		state.mu.Lock()
 		color := state.bgColor
+		dynamic := state.dynamicActive
 		state.mu.Unlock()
-		brush, _, _ := procCreateSolidBrush.Call(uintptr(color))
-		r := rect{Left: 0, Top: 0, Right: int32(screenWidth()), Bottom: int32(screenHeight())}
-		procFillRect.Call(hdc, uintptr(unsafe.Pointer(&r)), brush)
-		procDeleteObject.Call(brush)
+		paintRect := ps.RcPaint
+		if paintRect.Right <= paintRect.Left || paintRect.Bottom <= paintRect.Top {
+			paintRect = rect{Left: 0, Top: 0, Right: int32(screenWidth()), Bottom: int32(screenHeight())}
+		}
+		if dynamic {
+			fillRect(hdc, paintRect, dynamicBackgroundColor)
+			if patch, ok := intersectRects(paintRect, dynamicPatchRect()); ok {
+				fillRect(hdc, patch, color)
+			}
+		} else {
+			fillRect(hdc, paintRect, color)
+		}
 		procEndPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
 		return 0
-	case wmTimer:
-		if wParam == dynamicTimerID {
-			advanceDynamicFrame(hwnd)
-			return 0
-		}
-		ret, _, _ := procDefWindowProcW.Call(hwnd, message, wParam, lParam)
-		return ret
 	case wmAppInvalidate:
 		invalidateWindowNow(hwnd)
 		return 0
@@ -547,16 +554,12 @@ func windowProc(hwnd uintptr, message uintptr, wParam, lParam uintptr) uintptr {
 		procSetForegroundWindow.Call(hwnd)
 		return 0
 	case wmAppDynamicStart:
-		procKillTimer.Call(hwnd, dynamicTimerID)
-		interval := wParam
-		if interval == 0 {
-			interval = 16
-		}
-		procSetTimer.Call(hwnd, dynamicTimerID, interval, 0)
 		invalidateWindowNow(hwnd)
 		return 0
+	case wmAppDynamicFrame:
+		advanceDynamicFrame(hwnd, uint64(wParam))
+		return 0
 	case wmAppDynamicStop:
-		procKillTimer.Call(hwnd, dynamicTimerID)
 		invalidateWindowNow(hwnd)
 		return 0
 	case wmKeyDown:
@@ -590,7 +593,6 @@ func windowProc(hwnd uintptr, message uintptr, wParam, lParam uintptr) uintptr {
 		procShowWindow.Call(hwnd, swHide)
 		return 0
 	case wmDestroy:
-		procKillTimer.Call(hwnd, dynamicTimerID)
 		procPostQuitMessage.Call(0)
 		return 0
 	default:
@@ -704,13 +706,20 @@ func startDynamic(fps int) map[string]interface{} {
 		fps = 120
 	}
 	stopDynamic()
+	stop := make(chan struct{})
 	state.mu.Lock()
 	state.dynamicActive = true
 	state.dynamicFPS = fps
 	state.dynamicFrame = 0
+	state.dynamicGeneration++
+	generation := state.dynamicGeneration
+	state.dynamicFramePending = false
+	state.dynamicStop = stop
+	state.dynamicStarted = time.Now()
 	display := setColorStateLocked(dynamicFrameColor(0))
 	state.mu.Unlock()
-	postUIMessage(wmAppDynamicStart, uintptr(dynamicTimerIntervalMS(fps)), 0)
+	postUIMessage(wmAppDynamicStart, uintptr(generation), 0)
+	go runDynamicFrames(fps, generation, stop)
 	display["dynamic"] = true
 	display["fps"] = fps
 	return display
@@ -719,24 +728,51 @@ func startDynamic(fps int) map[string]interface{} {
 func stopDynamic() {
 	state.mu.Lock()
 	active := state.dynamicActive
+	stop := state.dynamicStop
 	state.dynamicActive = false
 	state.dynamicFPS = 0
 	state.dynamicFrame = 0
+	state.dynamicFramePending = false
+	state.dynamicStop = nil
+	state.dynamicStarted = time.Time{}
 	state.mu.Unlock()
+	if stop != nil {
+		close(stop)
+	}
 	if active {
 		postUIMessage(wmAppDynamicStop, 0, 0)
 	}
 }
 
-func dynamicTimerIntervalMS(fps int) int {
-	if fps < 1 {
-		fps = 60
+func runDynamicFrames(fps int, generation uint64, stop <-chan struct{}) {
+	interval := time.Second / time.Duration(fps)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			state.mu.Lock()
+			if !state.dynamicActive || state.dynamicGeneration != generation {
+				state.mu.Unlock()
+				return
+			}
+			if state.dynamicFramePending {
+				state.mu.Unlock()
+				continue
+			}
+			state.dynamicFramePending = true
+			state.mu.Unlock()
+			if !postUIMessage(wmAppDynamicFrame, uintptr(generation), 0) {
+				state.mu.Lock()
+				if state.dynamicGeneration == generation {
+					state.dynamicFramePending = false
+				}
+				state.mu.Unlock()
+			}
+		}
 	}
-	interval := 1000 / fps
-	if interval < 1 {
-		return 1
-	}
-	return interval
 }
 
 func dynamicFrameColor(frame int64) string {
@@ -746,16 +782,17 @@ func dynamicFrameColor(frame int64) string {
 	return fmt.Sprintf("#%02x%02x%02x", r, g, b)
 }
 
-func advanceDynamicFrame(hwnd uintptr) {
+func advanceDynamicFrame(hwnd uintptr, generation uint64) {
 	state.mu.Lock()
-	if !state.dynamicActive {
+	if !state.dynamicActive || state.dynamicGeneration != generation {
 		state.mu.Unlock()
 		return
 	}
+	state.dynamicFramePending = false
 	state.dynamicFrame++
 	setColorStateLocked(dynamicFrameColor(state.dynamicFrame))
 	state.mu.Unlock()
-	invalidateWindowNow(hwnd)
+	invalidateDynamicPatchNow(hwnd)
 }
 
 func setColorStateLocked(colorHex string) map[string]interface{} {
@@ -781,6 +818,13 @@ func setColorStateLocked(colorHex string) map[string]interface{} {
 func currentDisplayState() map[string]interface{} {
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	dynamicActualFPS := 0.0
+	if state.dynamicActive && !state.dynamicStarted.IsZero() {
+		elapsed := time.Since(state.dynamicStarted).Seconds()
+		if elapsed > 0 {
+			dynamicActualFPS = float64(state.dynamicFrame) / elapsed
+		}
+	}
 	return map[string]interface{}{
 		"color":                 state.colorHex,
 		"last_change_qpc":       state.lastColorChangeQpc,
@@ -788,6 +832,9 @@ func currentDisplayState() map[string]interface{} {
 		"sequence":              state.colorSequence,
 		"dynamic":               state.dynamicActive,
 		"dynamic_fps":           state.dynamicFPS,
+		"dynamic_frame":         state.dynamicFrame,
+		"dynamic_actual_fps":    dynamicActualFPS,
+		"display_refresh_hz":    screenRefreshHz(),
 		"qpc":                   qpcNow(),
 		"unix_nano":             time.Now().UnixNano(),
 	}
@@ -816,18 +863,74 @@ func focusWindow() {
 	}
 }
 
-func postUIMessage(message uint32, wParam uintptr, lParam uintptr) {
+func postUIMessage(message uint32, wParam uintptr, lParam uintptr) bool {
 	state.mu.Lock()
 	hwnd := state.hwnd
 	state.mu.Unlock()
-	if hwnd != 0 {
-		procPostMessageW.Call(hwnd, uintptr(message), wParam, lParam)
+	if hwnd == 0 {
+		return false
 	}
+	result, _, _ := procPostMessageW.Call(hwnd, uintptr(message), wParam, lParam)
+	return result != 0
 }
 
 func invalidateWindowNow(hwnd uintptr) {
 	procInvalidateRect.Call(hwnd, 0, 1)
 	procUpdateWindow.Call(hwnd)
+}
+
+func invalidateDynamicPatchNow(hwnd uintptr) {
+	patch := dynamicPatchRect()
+	procInvalidateRect.Call(hwnd, uintptr(unsafe.Pointer(&patch)), 0)
+	procUpdateWindow.Call(hwnd)
+}
+
+func dynamicPatchRect() rect {
+	width := int32(screenWidth())
+	height := int32(screenHeight())
+	size := int32(dynamicPatchSize)
+	if size > width {
+		size = width
+	}
+	if size > height {
+		size = height
+	}
+	left := (width - size) / 2
+	top := (height - size) / 2
+	return rect{Left: left, Top: top, Right: left + size, Bottom: top + size}
+}
+
+func intersectRects(a, b rect) (rect, bool) {
+	intersection := rect{
+		Left:   maxInt32(a.Left, b.Left),
+		Top:    maxInt32(a.Top, b.Top),
+		Right:  minInt32(a.Right, b.Right),
+		Bottom: minInt32(a.Bottom, b.Bottom),
+	}
+	return intersection, intersection.Right > intersection.Left && intersection.Bottom > intersection.Top
+}
+
+func fillRect(hdc uintptr, area rect, color uint32) {
+	brush, _, _ := procCreateSolidBrush.Call(uintptr(color))
+	if brush == 0 {
+		return
+	}
+	procFillRect.Call(hdc, uintptr(unsafe.Pointer(&area)), brush)
+	procDeleteObject.Call(brush)
+}
+
+func minInt32(a, b int32) int32 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt32(a, b int32) int32 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func disableIME(hwnd uintptr) {
@@ -870,7 +973,18 @@ func screenSize() (int, int) {
 
 func screenInfo() map[string]int {
 	width, height := screenSize()
-	return map[string]int{"width": width, "height": height}
+	return map[string]int{"width": width, "height": height, "refresh_hz": screenRefreshHz()}
+}
+
+func screenRefreshHz() int {
+	const vRefresh = 116
+	hdc, _, _ := procGetDC.Call(0)
+	if hdc == 0 {
+		return 0
+	}
+	defer procReleaseDC.Call(0, hdc)
+	refresh, _, _ := procGetDeviceCaps.Call(hdc, vRefresh)
+	return int(refresh)
 }
 
 func screenWidth() int {

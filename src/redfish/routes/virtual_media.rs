@@ -9,8 +9,8 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use super::super::schema::*;
-use super::{empty_collection, resource_not_found, service_unavailable, validate_id};
-use crate::error::AppError;
+use super::{empty_collection, resource_not_found, validate_id};
+use crate::error::{AppError, MsdErrorCode};
 use crate::msd::{ImageInfo, ImageManager, MountedMedia, MountedMediaKind};
 use crate::state::AppState;
 
@@ -46,7 +46,7 @@ async fn virtual_media_collection(
     let capacity = {
         let guard = state.msd.read().await;
         let Some(msd) = guard.as_ref() else {
-            return service_unavailable("MSD not available");
+            return msd_error_response(MsdErrorCode::MsdUnavailable);
         };
         msd.state().await.disk_mode.capacity()
     };
@@ -81,7 +81,7 @@ async fn virtual_media_detail(
     let (msd_state, lun) = {
         let guard = state.msd.read().await;
         let Some(msd) = guard.as_ref() else {
-            return service_unavailable("MSD not available");
+            return msd_error_response(MsdErrorCode::MsdUnavailable);
         };
         let msd_state = msd.state().await;
         let Some(lun) = parse_slot_id(&media_id, msd_state.disk_mode.capacity()) else {
@@ -164,17 +164,14 @@ async fn virtual_media_insert(
     let lun = {
         let guard = state.msd.read().await;
         let Some(msd) = guard.as_ref() else {
-            return service_unavailable("MSD not available");
+            return msd_error_response(MsdErrorCode::MsdUnavailable);
         };
         let msd_state = msd.state().await;
         let Some(lun) = parse_slot_id(&media_id, msd_state.disk_mode.capacity()) else {
             return resource_not_found();
         };
         if msd_state.mounted_media.iter().any(|media| media.lun == lun) {
-            return redfish_error(
-                StatusCode::CONFLICT,
-                "Virtual media slot is already occupied",
-            );
+            return msd_error_response(MsdErrorCode::MsdMediaSlotsFull);
         }
         lun
     };
@@ -194,7 +191,7 @@ async fn virtual_media_insert(
     let result = {
         let guard = state.msd.read().await;
         let Some(msd) = guard.as_ref() else {
-            return service_unavailable("MSD not available");
+            return msd_error_response(MsdErrorCode::MsdUnavailable);
         };
         msd.mount_image_at_lun(&image, cdrom, read_only, lun).await
     };
@@ -222,7 +219,7 @@ async fn virtual_media_eject(
     let lun = {
         let guard = state.msd.read().await;
         let Some(msd) = guard.as_ref() else {
-            return service_unavailable("MSD not available");
+            return msd_error_response(MsdErrorCode::MsdUnavailable);
         };
         let capacity = msd.state().await.disk_mode.capacity();
         let Some(lun) = parse_slot_id(&media_id, capacity) else {
@@ -234,7 +231,7 @@ async fn virtual_media_eject(
     let result = {
         let guard = state.msd.read().await;
         let Some(msd) = guard.as_ref() else {
-            return service_unavailable("MSD not available");
+            return msd_error_response(MsdErrorCode::MsdUnavailable);
         };
         msd.unmount_lun(lun).await
     };
@@ -352,6 +349,9 @@ async fn resolve_image(
 }
 
 fn app_error_response(error: AppError) -> Response {
+    if let AppError::Msd(error) = error {
+        return msd_error_response(error.code());
+    }
     let status = match &error {
         AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
         AppError::NotFound(_) => StatusCode::NOT_FOUND,
@@ -359,6 +359,35 @@ fn app_error_response(error: AppError) -> Response {
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
     redfish_error(status, &error.to_string())
+}
+
+fn msd_error_response(code: MsdErrorCode) -> Response {
+    use MsdErrorCode::*;
+    let status = match code {
+        MsdUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+        MsdResourceNotFound | MsdDriveNotInitialized => StatusCode::NOT_FOUND,
+        MsdOperationInProgress
+        | MsdResourceAlreadyExists
+        | MsdMediaSlotsFull
+        | MsdMediaAlreadyMounted
+        | MsdMediaInUse
+        | MsdDriveConnected
+        | MsdMediumRemovalPrevented => StatusCode::CONFLICT,
+        MsdInvalidRequest
+        | MsdImageTooLarge
+        | MsdInvalidUrl
+        | MsdDriveFilesystemUnsupported
+        | MsdDriveSizeInvalid
+        | MsdStorageSpaceUnavailable
+        | MsdStorageFull
+        | MsdStorageReadOnly
+        | MsdStoragePermissionDenied => StatusCode::BAD_REQUEST,
+        MsdOperationFailed
+        | MsdRemoteDownloadFailed
+        | MsdDownloadIncomplete
+        | MsdDisconnectFailed => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (status, Json(RedfishError::msd(code))).into_response()
 }
 
 fn redfish_error(status: StatusCode, message: &str) -> Response {
@@ -420,5 +449,46 @@ mod tests {
         let mut not_inserted = request("image.iso");
         not_inserted.inserted = Some(false);
         assert!(validate_insert_request(&not_inserted).is_err());
+    }
+
+    #[test]
+    fn msd_redfish_errors_use_the_one_kvm_registry_shape() {
+        for code in MsdErrorCode::ALL {
+            let body = RedfishError::msd(code);
+            let expected = format!("OneKVM.1.0.{}", code.redfish_key());
+            assert_eq!(body.error.code, expected);
+            assert_eq!(body.error.message, code.message());
+            assert_eq!(body.error.extended_info.len(), 1);
+            let info = &body.error.extended_info[0];
+            assert_eq!(info.message_id, expected);
+            assert_eq!(info.message, code.message());
+            assert_eq!(info.severity, code.severity());
+            assert_eq!(info.resolution, code.resolution());
+        }
+    }
+
+    #[tokio::test]
+    async fn msd_and_validation_errors_keep_separate_redfish_registries() {
+        let response = msd_error_response(MsdErrorCode::MsdStoragePermissionDenied);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json["error"]["code"],
+            "OneKVM.1.0.MsdStoragePermissionDenied"
+        );
+        assert_eq!(
+            json["error"]["@Message.ExtendedInfo"][0]["MessageId"],
+            "OneKVM.1.0.MsdStoragePermissionDenied"
+        );
+
+        let validation = app_error_response(AppError::BadRequest("invalid property".into()));
+        let body = axum::body::to_bytes(validation.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["code"], "Base.1.18.GeneralError");
     }
 }

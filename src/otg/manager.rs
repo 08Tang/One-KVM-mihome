@@ -4,12 +4,12 @@ use tracing::{debug, error, info, warn};
 
 use super::configfs::{
     configfs_path, create_dir, create_symlink, find_udc, is_configfs_available, remove_dir,
-    remove_file, write_file, DEFAULT_GADGET_NAME, DEFAULT_USB_BCD_DEVICE, DEFAULT_USB_PRODUCT_ID,
-    DEFAULT_USB_VENDOR_ID, USB_BCD_USB,
+    remove_file, write_file, write_file_if_exists, DEFAULT_GADGET_NAME, DEFAULT_USB_BCD_DEVICE,
+    DEFAULT_USB_PRODUCT_ID, DEFAULT_USB_VENDOR_ID, USB_BCD_USB,
 };
 use super::function::GadgetFunction;
 use super::hid::HidFunction;
-use super::msd::MsdFunction;
+use super::msd::{MsdFunction, MsdInquiryStrings};
 use super::network::NetworkFunction;
 use crate::config::OtgNetworkConfig;
 use crate::error::{AppError, Result};
@@ -47,6 +47,7 @@ pub struct OtgGadgetManager {
     hid_instance: u8,
     msd_instance: u8,
     network_instance: u8,
+    uac_instance: u8,
     functions: Vec<Box<dyn GadgetFunction>>,
     bound_udc: Option<String>,
     created_by_us: bool,
@@ -73,6 +74,7 @@ impl OtgGadgetManager {
             hid_instance: 0,
             msd_instance: 0,
             network_instance: 0,
+            uac_instance: 0,
             functions: Vec::with_capacity(4),
             bound_udc: None,
             created_by_us: false,
@@ -132,8 +134,12 @@ impl OtgGadgetManager {
         Ok(device_path)
     }
 
-    pub fn add_msd(&mut self, lun_capacity: u8) -> Result<MsdFunction> {
-        let func = MsdFunction::new(self.msd_instance, lun_capacity)?;
+    pub fn add_msd(
+        &mut self,
+        lun_capacity: u8,
+        inquiry_strings: MsdInquiryStrings,
+    ) -> Result<MsdFunction> {
+        let func = MsdFunction::new(self.msd_instance, lun_capacity, inquiry_strings)?;
         let func_clone = func.clone();
         self.add_function(Box::new(func))?;
         self.msd_instance += 1;
@@ -145,6 +151,14 @@ impl OtgGadgetManager {
         let func_clone = func.clone();
         self.add_function(Box::new(func))?;
         self.network_instance += 1;
+        Ok(func_clone)
+    }
+
+    pub fn add_uac(&mut self, sample_rate: u32, channels: u8) -> Result<super::uac::UacFunction> {
+        let func = super::uac::UacFunction::new(self.uac_instance, sample_rate, channels)?;
+        let func_clone = func.clone();
+        self.add_function(Box::new(func))?;
+        self.uac_instance += 1;
         Ok(func_clone)
     }
 
@@ -184,6 +198,22 @@ impl OtgGadgetManager {
         for func in &self.functions {
             func.create(&self.gadget_path)?;
             func.link(&self.config_path, &self.gadget_path)?;
+        }
+
+        // A host only enables USB remote wakeup when the configuration
+        // descriptor advertises it. Enable the descriptor bit only when the
+        // running kernel supports the HID wakeup_on_write attribute.
+        let hid_wakeup_supported = self.functions.iter().any(|func| {
+            func.name().starts_with("hid.")
+                && self
+                    .gadget_path
+                    .join("functions")
+                    .join(func.name())
+                    .join("wakeup_on_write")
+                    .exists()
+        });
+        if hid_wakeup_supported {
+            let _ = write_file_if_exists(&self.config_path.join("bmAttributes"), "0xA0")?;
         }
 
         debug!("OTG USB Gadget setup complete");

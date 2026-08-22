@@ -23,6 +23,8 @@
   --destructive-foreground: oklch(98.48% 0 0);
   --success: oklch(52.7% 0.154 150.07);
   --success-foreground: oklch(98.48% 0 0);
+  /* Compact state indicators need stronger luminance separation than success text. */
+  --status-active: oklch(72.3% 0.219 149.58);
   --warning: oklch(55.4% 0.135 66.44);
   --warning-foreground: oklch(98.48% 0 0);
   --info: oklch(54.6% 0.245 262.88);
@@ -111,6 +113,7 @@
   --color-destructive-foreground: var(--destructive-foreground);
   --color-success: var(--success);
   --color-success-foreground: var(--success-foreground);
+  --color-status-active: var(--status-active);
   --color-warning: var(--warning);
   --color-warning-foreground: var(--warning-foreground);
   --color-info: var(--info);

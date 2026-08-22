@@ -14,4 +14,5 @@ pub use types::{
 };
 pub use ventoy_drive::{VentoyDrive, MIN_DRIVE_SIZE_MB};
 
+pub use crate::error::{MsdError, MsdErrorCode};
 pub use crate::otg::{MsdFunction, MsdLunConfig};

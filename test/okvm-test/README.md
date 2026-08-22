@@ -76,8 +76,8 @@ python okvm_testctl.py run `
 
 控制端会先通过 SSH 执行 `lsusb -t`，再结合 `/api/devices` 自动选择视频输入：
 
-- USB2.0 采集卡：测试 `1080p30 MJPEG`，再切换 `1080p YUYV` 并选择该分辨率最高帧率；如果没有 1080p YUYV，才退到不超过 1080p 的最高分辨率。
-- USB3.0 采集卡：测试 `1080p60 MJPEG`，再切换 `1080p YUYV` 并选择该分辨率最高帧率；如果没有 1080p YUYV，才退到不超过 1080p 的最高分辨率。
+- USB2.0 采集卡（MS2131 测试档位）：严格测试 `1080p50 MJPEG` 和 `1080p10 YUYV`；任一格式、分辨率或帧率未申报时，立即将 `video_input_select` 标记为 `FAIL` 并中止测试，不回退到其他档位。
+- USB3.0 采集卡：测试 `1080p60 MJPEG`，再切换 `1080p YUYV` 并选择该分辨率申报的最高帧率；如果没有 1080p YUYV，立即将 `video_input_select` 标记为 `FAIL` 并中止测试，不再回退到较低分辨率。
 - CSI/MIPI：只测试一套 `1080p60 NV12`，不做输入格式切换。
 
 每个输入配置都会跑三种输出：
@@ -87,6 +87,7 @@ python okvm_testctl.py run `
 - H.265 WebRTC
 
 默认每个视频输出模式采样 30 秒；可通过 `--sample-seconds <秒数>` 覆盖。
+每次应用视频输入配置后默认先空转 3 秒，稳定后再开始统计；可通过 `--video-config-settle-seconds <秒数>` 调整。
 
 MJPEG/HTTP 测试时，控制端会让 Windows agent 输出默认 60fps 的全屏动态画面，避免静态画面触发 MJPEG “无变化不发帧”策略导致 fps 误判；可通过 `--mjpeg-motion-fps <fps>` 覆盖。
 

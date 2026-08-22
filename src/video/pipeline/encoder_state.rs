@@ -1,4 +1,5 @@
 use crate::error::{AppError, Result};
+use crate::video::codec::amlenc::{AmlencCodec, AmlencConfig, AmlencEncoder};
 use crate::video::codec::convert::{MjpegToNv12Decoder, Nv12Converter, PixelConverter};
 use crate::video::codec::h264::{H264Config, H264Encoder, H264InputFormat};
 use crate::video::codec::h265::{H265Config, H265Encoder, H265InputFormat};
@@ -116,6 +117,47 @@ impl VideoEncoderTrait for H265EncoderWrapper {
     }
 }
 
+struct AmlencEncoderWrapper(AmlencEncoder);
+
+impl VideoEncoderTrait for AmlencEncoderWrapper {
+    fn encode_raw(&mut self, data: &[u8], _pts_ms: i64) -> Result<Vec<EncodedFrame>> {
+        Ok(match self.0.encode_raw(data)? {
+            Some((data, keyframe)) => vec![EncodedFrame {
+                data,
+                key: i32::from(keyframe),
+            }],
+            None => Vec::new(),
+        })
+    }
+
+    fn set_bitrate(&mut self, bitrate_kbps: u32) -> Result<()> {
+        self.0.set_bitrate(bitrate_kbps)
+    }
+
+    fn codec_name(&self) -> &str {
+        self.0.codec_name()
+    }
+
+    fn request_keyframe(&mut self) {
+        self.0.request_keyframe()
+    }
+}
+
+fn create_amlenc_encoder(
+    config: &SharedVideoPipelineConfig,
+    codec: AmlencCodec,
+) -> Result<Box<dyn VideoEncoderTrait + Send>> {
+    let encoder = AmlencEncoder::new(AmlencConfig {
+        codec,
+        resolution: config.resolution,
+        fps: config.fps,
+        bitrate_kbps: config.bitrate_kbps(),
+        gop: config.gop_size(),
+    })?;
+    info!("Created native AMLENC encoder: {}", encoder.codec_name());
+    Ok(Box::new(AmlencEncoderWrapper(encoder)))
+}
+
 struct VP8EncoderWrapper(VP8Encoder);
 
 impl VideoEncoderTrait for VP8EncoderWrapper {
@@ -189,6 +231,26 @@ fn create_mjpeg_decoder(resolution: Resolution) -> Result<(MjpegDecoderKind, Pix
     Ok((libyuv_mjpeg_decoder(resolution), PixelFormat::Nv12))
 }
 
+/// AMLENC and libjpeg-turbo use independent CPU/hardware resources. Decode
+/// MJPEG in the capture worker so encoding the previous NV12 frame can overlap
+/// with decoding the next frame.
+pub(super) fn should_parallel_decode_mjpeg(config: &SharedVideoPipelineConfig) -> bool {
+    if !config.input_format.is_compressed()
+        || !matches!(
+            config.output_codec,
+            VideoEncoderType::H264 | VideoEncoderType::H265
+        )
+    {
+        return false;
+    }
+    let registry = EncoderRegistry::global();
+    let selected = match config.encoder_backend {
+        Some(backend) => registry.encoder_with_backend(config.output_codec, backend),
+        None => registry.best_available_encoder(config.output_codec),
+    };
+    selected.is_some_and(|encoder| encoder.backend == EncoderBackend::Amlogic)
+}
+
 pub(super) fn build_encoder_state(
     config: &SharedVideoPipelineConfig,
 ) -> Result<EncoderThreadState> {
@@ -210,9 +272,14 @@ pub(super) fn build_encoder_state(
     let is_rkmpp_available = registry
         .encoder_with_backend(VideoEncoderType::H264, EncoderBackend::Rkmpp)
         .is_some();
-    let use_yuyv_direct =
-        is_rkmpp_available && !needs_mjpeg_decode && config.input_format == PixelFormat::Yuyv;
+    let rkmpp_is_allowed =
+        config.encoder_backend.is_none() || config.encoder_backend == Some(EncoderBackend::Rkmpp);
+    let use_yuyv_direct = is_rkmpp_available
+        && rkmpp_is_allowed
+        && !needs_mjpeg_decode
+        && config.input_format == PixelFormat::Yuyv;
     let use_rkmpp_direct = is_rkmpp_available
+        && rkmpp_is_allowed
         && !needs_mjpeg_decode
         && matches!(
             config.input_format,
@@ -348,70 +415,80 @@ pub(super) fn build_encoder_state(
     let encoder: Box<dyn VideoEncoderTrait + Send> = match config.output_codec {
         VideoEncoderType::H264 => {
             let codec_name = selected_codec_name.clone();
-            let direct_input_format = h264_direct_input_format(&codec_name, pipeline_input_format);
-            let input_format = direct_input_format.unwrap_or_else(|| {
-                if codec_name.contains("libx264") {
-                    H264InputFormat::Yuv420p
-                } else {
-                    H264InputFormat::Nv12
+            if codec_name == crate::video::codec::amlenc::AMLENC_H264_CODEC_NAME {
+                create_amlenc_encoder(config, AmlencCodec::H264)?
+            } else {
+                let direct_input_format =
+                    h264_direct_input_format(&codec_name, pipeline_input_format);
+                let input_format = direct_input_format.unwrap_or_else(|| {
+                    if codec_name.contains("libx264") {
+                        H264InputFormat::Yuv420p
+                    } else {
+                        H264InputFormat::Nv12
+                    }
+                });
+
+                if use_rkmpp_direct {
+                    info!(
+                        "Creating H264 encoder with RKMPP backend for {} direct input (codec: {})",
+                        config.input_format, codec_name
+                    );
+                } else if let Some(ref backend) = config.encoder_backend {
+                    info!(
+                        "Creating H264 encoder with backend {:?} (codec: {})",
+                        backend, codec_name
+                    );
                 }
-            });
 
-            if use_rkmpp_direct {
-                info!(
-                    "Creating H264 encoder with RKMPP backend for {} direct input (codec: {})",
-                    config.input_format, codec_name
-                );
-            } else if let Some(ref backend) = config.encoder_backend {
-                info!(
-                    "Creating H264 encoder with backend {:?} (codec: {})",
-                    backend, codec_name
-                );
+                create_h264_encoder(config, input_format, &codec_name)?
             }
-
-            create_h264_encoder(config, input_format, &codec_name)?
         }
         VideoEncoderType::H265 => {
             let codec_name = selected_codec_name.clone();
-            let direct_input_format = h265_direct_input_format(&codec_name, pipeline_input_format);
-            let input_format = direct_input_format.unwrap_or_else(|| {
-                if codec_name.contains("libx265") {
-                    H265InputFormat::Yuv420p
-                } else {
-                    H265InputFormat::Nv12
+            if codec_name == crate::video::codec::amlenc::AMLENC_H265_CODEC_NAME {
+                create_amlenc_encoder(config, AmlencCodec::H265)?
+            } else {
+                let direct_input_format =
+                    h265_direct_input_format(&codec_name, pipeline_input_format);
+                let input_format = direct_input_format.unwrap_or_else(|| {
+                    if codec_name.contains("libx265") {
+                        H265InputFormat::Yuv420p
+                    } else {
+                        H265InputFormat::Nv12
+                    }
+                });
+
+                if use_rkmpp_direct {
+                    info!(
+                        "Creating H265 encoder with RKMPP backend for {} direct input (codec: {})",
+                        config.input_format, codec_name
+                    );
+                } else if let Some(ref backend) = config.encoder_backend {
+                    info!(
+                        "Creating H265 encoder with backend {:?} (codec: {})",
+                        backend, codec_name
+                    );
                 }
-            });
 
-            if use_rkmpp_direct {
-                info!(
-                    "Creating H265 encoder with RKMPP backend for {} direct input (codec: {})",
-                    config.input_format, codec_name
-                );
-            } else if let Some(ref backend) = config.encoder_backend {
-                info!(
-                    "Creating H265 encoder with backend {:?} (codec: {})",
-                    backend, codec_name
-                );
-            }
-
-            let encoder = H265Encoder::with_codec(
-                H265Config {
-                    base: EncoderConfig {
-                        resolution: config.resolution,
-                        input_format: config.input_format,
-                        quality: config.bitrate_kbps(),
-                        fps: config.fps,
+                let encoder = H265Encoder::with_codec(
+                    H265Config {
+                        base: EncoderConfig {
+                            resolution: config.resolution,
+                            input_format: config.input_format,
+                            quality: config.bitrate_kbps(),
+                            fps: config.fps,
+                            gop_size: config.gop_size(),
+                        },
+                        bitrate_kbps: config.bitrate_kbps(),
                         gop_size: config.gop_size(),
+                        fps: config.fps,
+                        input_format,
                     },
-                    bitrate_kbps: config.bitrate_kbps(),
-                    gop_size: config.gop_size(),
-                    fps: config.fps,
-                    input_format,
-                },
-                &codec_name,
-            )?;
-            info!("Created H265 encoder: {}", encoder.codec_name());
-            Box::new(H265EncoderWrapper(encoder))
+                    &codec_name,
+                )?;
+                info!("Created H265 encoder: {}", encoder.codec_name());
+                Box::new(H265EncoderWrapper(encoder))
+            }
         }
         VideoEncoderType::VP8 => {
             let codec_name = selected_codec_name.clone();
@@ -446,7 +523,9 @@ pub(super) fn build_encoder_state(
     };
 
     let codec_name = encoder.codec_name();
-    let use_direct_input = if codec_name.contains("rkmpp") {
+    let use_direct_input = if codec_name.contains("amlenc") {
+        pipeline_input_format == PixelFormat::Nv12
+    } else if codec_name.contains("rkmpp") {
         matches!(
             pipeline_input_format,
             PixelFormat::Yuyv

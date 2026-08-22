@@ -11,6 +11,7 @@ import {
   authApi,
   configApi,
   otgNetworkApi,
+  uacApi,
   hidApi,
   streamApi,
   atxConfigApi,
@@ -40,6 +41,7 @@ import {
   type UpdateStatusResponse,
   type UpdateChannel,
   type VideoEncoderSelfCheckResponse,
+  type DeviceList,
 } from '@/api'
 import type {
   ExtensionsStatus,
@@ -55,17 +57,20 @@ import type {
   OtgNetworkStatus,
   WatchdogConfigResponse,
 } from '@/types/generated'
-import { FrpProxyType, FrpcConfigMode } from '@/types/generated'
-import { formatFpsLabel, toConfigFps } from '@/lib/fps'
+import { EasytierConfigMode, FrpProxyType, FrpcConfigMode } from '@/types/generated'
+import { toConfigFps } from '@/lib/fps'
 import { useClipboard } from '@/composables/useClipboard'
 import { useFeatureVisibility } from '@/composables/useFeatureVisibility'
 import { useTheme } from '@/composables/useTheme'
+import { useVideoDeviceConfiguration } from '@/composables/useVideoDeviceConfiguration'
 import { getVideoFormatState } from '@/lib/video-format-support'
 import { formatVideoDeviceLabel } from '@/lib/video-device-label'
 import AppLayout from '@/components/AppLayout.vue'
 import LanguageToggleButton from '@/components/LanguageToggleButton.vue'
 import TerminalDialog from '@/components/TerminalDialog.vue'
 import TotpSettingsCard from '@/components/TotpSettingsCard.vue'
+import VideoInputFields from '@/components/VideoInputFields.vue'
+import ExtensionConfigModeEditor from '@/components/ExtensionConfigModeEditor.vue'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -75,7 +80,6 @@ import { Separator } from '@/components/ui/separator'
 import { Badge } from '@/components/ui/badge'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { ButtonGroup } from '@/components/ui/button-group'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia } from '@/components/ui/empty'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -153,6 +157,7 @@ const configStore = useConfigStore()
 const authStore = useAuthStore()
 const featureVisibility = useFeatureVisibility()
 const { theme, setTheme } = useTheme()
+const EMPTY_SELECT_VALUE = '__one-kvm-empty-select-value__'
 
 const isWindows = computed(() => systemStore.platform?.mode === 'windows')
 
@@ -275,15 +280,12 @@ async function loadSectionData(section: SettingsSectionId) {
     case 'video':
       await Promise.all([
         loadConfig(),
-        loadDevices(),
+        loadDeviceConfig(),
         loadBackends(),
       ])
       return
     case 'hid':
-      await Promise.all([
-        loadConfig(),
-        loadDevices(),
-      ])
+      await Promise.all([loadConfig(), loadHidDeviceOptions()])
       return
     case 'atx':
       await Promise.all([
@@ -376,7 +378,7 @@ function watchdogRequestError(error: unknown, action: 'enable' | 'disable'): str
 
 const watchdogStatusClass = computed(() => {
   switch (watchdogStatusKey.value) {
-    case 'running': return 'bg-success'
+    case 'running': return 'bg-status-active'
     case 'error': return 'bg-destructive'
     default: return 'bg-muted-foreground'
   }
@@ -440,7 +442,15 @@ const showTerminalDialog = ref(false)
 const extConfig = ref({
   ttyd: { enabled: false, shell: '/bin/bash' },
   gostc: { enabled: false, addr: '', key: '', tls: true },
-  easytier: { enabled: false, network_name: '', network_secret: '', peer_urls: [] as string[], virtual_ip: '' },
+  easytier: {
+    enabled: false,
+    config_mode: EasytierConfigMode.Quick,
+    network_name: '',
+    network_secret: '',
+    peer_urls: [] as string[],
+    virtual_ip: '',
+    custom_toml: '',
+  },
   frpc: {
     enabled: false,
     config_mode: FrpcConfigMode.Quick,
@@ -466,6 +476,10 @@ const gostcValidationMessage = computed(() => {
 })
 
 const easytierValidationMessage = computed(() => {
+  if (extConfig.value.easytier.config_mode === EasytierConfigMode.Full) {
+    if (!extConfig.value.easytier.custom_toml?.trim()) return t('extensions.easytier.fullConfigRequired')
+    return ''
+  }
   if (!extConfig.value.easytier.network_name?.trim()) return t('extensions.easytier.networkNameRequired')
   return ''
 })
@@ -643,27 +657,7 @@ function openPreviewUrl() {
   window.open(previewAccessUrl.value, '_blank', 'noopener,noreferrer')
 }
 
-interface DeviceConfig {
-  video: Array<{
-    path: string
-    name: string
-    driver: string
-    formats: Array<{
-      format: string
-      description: string
-      resolutions: Array<{
-        width: number
-        height: number
-        fps: number[]
-      }>
-    }>
-  }>
-  serial: Array<{ path: string; name: string }>
-  audio: Array<{ name: string; description: string }>
-  udc: Array<{ name: string }>
-}
-
-const devices = ref<DeviceConfig>({
+const devices = ref<Pick<DeviceList, 'video' | 'serial' | 'audio' | 'udc'>>({
   video: [],
   serial: [],
   audio: [],
@@ -691,6 +685,8 @@ const config = ref({
   hid_ch9329_hybrid_mouse: false,
   msd_enabled: false,
   msd_dir: '',
+  msd_flash_inquiry_string: 'One-KVM Virtual Flash',
+  msd_cdrom_inquiry_string: 'One-KVM Virtual CD-ROM',
   otg_network_enabled: false,
   otg_network_driver: 'ncm' as 'ncm' | 'ecm' | 'rndis',
   otg_network_interface: '',
@@ -699,10 +695,12 @@ const config = ref({
   turn_server: '',
   turn_username: '',
   turn_password: '',
+  uac_enabled: false,
 })
 
 const otgNetworkInterfaces = ref<NetworkInterfaceInfo[]>([])
 const otgNetworkInterfacesLoaded = ref(false)
+const otgNetworkInterfacesError = ref('')
 const otgNetworkStatus = ref<OtgNetworkStatus | null>(null)
 
 function syncOtgNetworkInterface() {
@@ -831,7 +829,7 @@ function otgCheckStatusText(level: OtgSelfCheckLevel): string {
 function otgGroupStatusClass(status: OtgCheckGroupStatus): string {
   if (status === 'error') return 'bg-destructive'
   if (status === 'warn') return 'bg-warning'
-  if (status === 'ok') return 'bg-success'
+  if (status === 'ok') return 'bg-status-active'
   return 'bg-muted-foreground/40'
 }
 
@@ -1027,6 +1025,18 @@ const isHidFunctionSelectionValid = computed(() => {
   return !!(f.keyboard || f.mouse_relative || f.mouse_absolute || f.consumer)
 })
 
+function isValidInquiryString(value: string): boolean {
+  return /^[\x20-\x7e]{1,28}$/.test(value.trim())
+}
+
+const areMsdInquiryStringsValid = computed(() =>
+  !config.value.msd_enabled
+  || (
+    isValidInquiryString(config.value.msd_flash_inquiry_string)
+    && isValidInquiryString(config.value.msd_cdrom_inquiry_string)
+  )
+)
+
 const otgVendorIdHex = ref('1d6b')
 const otgProductIdHex = ref('0104')
 const otgManufacturer = ref('One-KVM')
@@ -1158,6 +1168,7 @@ const isCh9329DescriptorDirty = computed(() => {
 const isHidSettingsValid = computed(() =>
   isHidFunctionSelectionValid.value
   && isCh9329DescriptorValid.value
+  && areMsdInquiryStringsValid.value
 )
 
 watch(bindMode, (mode) => {
@@ -1234,14 +1245,52 @@ const selectedBackendFormats = computed(() => {
   return backend?.supported_formats || []
 })
 
-const selectedDevice = computed(() => {
-  return devices.value.video.find(d => d.path === config.value.video_device)
+const videoDeviceSelection = computed({
+  get: () => config.value.video_device,
+  set: value => { config.value.video_device = value },
+})
+const videoFormatSelection = computed({
+  get: () => config.value.video_format,
+  set: value => { config.value.video_format = value },
+})
+const videoResolutionSelection = computed({
+  get: () => `${config.value.video_width}x${config.value.video_height}`,
+  set: value => {
+    const [width, height] = value.split('x').map(Number)
+    if (width && height) {
+      config.value.video_width = width
+      config.value.video_height = height
+    }
+  },
+})
+const videoFpsSelection = computed<number | null>({
+  get: () => config.value.video_fps,
+  set: value => { if (value !== null) config.value.video_fps = value },
 })
 
-const availableFormats = computed(() => {
-  if (!selectedDevice.value) return []
-  return selectedDevice.value.formats
+const videoConfiguration = useVideoDeviceConfiguration({
+  devices: computed(() => devices.value.video),
+  selection: {
+    device: videoDeviceSelection,
+    format: videoFormatSelection,
+    resolution: videoResolutionSelection,
+    fps: videoFpsSelection,
+  },
+  active: computed(() => activeSection.value === 'video'),
+  listenForStreamEvents: true,
+  preferredFormat: device => device.formats.find(format =>
+    getVideoFormatState(format.format, 'config', config.value.encoder_backend) !== 'unsupported',
+  )?.format,
 })
+const {
+  selectedDevice,
+  isSourceFollowing,
+  availableFormats,
+  availableResolutions,
+  availableFps,
+  refreshInputStatus,
+  refreshingInputStatus,
+} = videoConfiguration
 
 const availableFormatOptions = computed(() => {
   return availableFormats.value.map(format => {
@@ -1256,36 +1305,6 @@ const availableFormatOptions = computed(() => {
 
 const selectableFormats = computed(() => {
   return availableFormatOptions.value.filter(format => !format.disabled)
-})
-
-const selectedFormat = computed(() => {
-  if (!selectedDevice.value || !config.value.video_format) return null
-  return selectedDevice.value.formats.find(f => f.format === config.value.video_format)
-})
-
-const availableResolutions = computed(() => {
-  if (!selectedFormat.value) return []
-  const resMap = new Map<string, { width: number; height: number; fps: number[] }>()
-
-  selectedFormat.value.resolutions.forEach(res => {
-    const key = `${res.width}x${res.height}`
-    if (!resMap.has(key)) {
-      resMap.set(key, { ...res })
-    } else {
-      const existing = resMap.get(key)!
-      const allFps = [...new Set([...existing.fps, ...res.fps])].sort((a, b) => b - a)
-      existing.fps = allFps
-    }
-  })
-  
-  return Array.from(resMap.values()).sort((a, b) => (b.width * b.height) - (a.width * a.height))
-})
-
-const availableFps = computed(() => {
-  const currentRes = availableResolutions.value.find(
-    r => r.width === config.value.video_width && r.height === config.value.video_height
-  )
-  return currentRes ? currentRes.fps : []
 })
 
 watch(
@@ -1303,34 +1322,6 @@ watch(
   },
   { deep: true },
 )
-
-watch(() => config.value.video_format, () => {
-  if (availableResolutions.value.length > 0) {
-    const isValid = availableResolutions.value.some(
-      r => r.width === config.value.video_width && r.height === config.value.video_height
-    )
-    if (!isValid) {
-      const best = availableResolutions.value[0]
-      if (best) {
-        config.value.video_width = best.width
-        config.value.video_height = best.height
-        if (best.fps?.[0]) config.value.video_fps = best.fps[0]
-      }
-    }
-  }
-})
-
-watch(() => [config.value.video_width, config.value.video_height], () => {
-  const fpsList = availableFps.value
-  if (fpsList.length > 0) {
-    if (!fpsList.includes(config.value.video_fps)) {
-      const firstFps = fpsList[0]
-      if (typeof firstFps === 'number') {
-        config.value.video_fps = firstFps
-      }
-    }
-  }
-})
 
 watch(() => authStore.user, (value) => {
   if (value) {
@@ -1438,13 +1429,15 @@ async function saveConfig() {
         turn_username: config.value.turn_username.trim(),
         turn_password: config.value.turn_password.trim(),
       })
-      await configStore.updateVideo({
-        device: config.value.video_device || undefined,
-        format: config.value.video_format || undefined,
-        width: config.value.video_width,
-        height: config.value.video_height,
-        fps: toConfigFps(config.value.video_fps),
-      })
+      await configStore.updateVideo(isSourceFollowing.value
+        ? { device: config.value.video_device || undefined }
+        : {
+            device: config.value.video_device || undefined,
+            format: config.value.video_format || undefined,
+            width: config.value.video_width,
+            height: config.value.video_height,
+            fps: toConfigFps(config.value.video_fps),
+          })
     }
 
     if (activeSection.value === 'hid') {
@@ -1485,6 +1478,8 @@ async function saveConfig() {
         msd: {
           enabled: otgEnabled && config.value.msd_enabled,
           msd_dir: config.value.msd_dir || undefined,
+          flash_inquiry_string: config.value.msd_flash_inquiry_string,
+          cdrom_inquiry_string: config.value.msd_cdrom_inquiry_string,
         },
         network: {
           enabled: otgEnabled && config.value.otg_network_enabled,
@@ -1493,6 +1488,12 @@ async function saveConfig() {
         },
       })
       otgNetworkStatus.value = response.status
+
+      await uacApi.update({
+        enabled: otgEnabled && config.value.uac_enabled,
+        sample_rate: 48000,
+        channels: 2,
+      })
     }
 
     if (activeSection.value !== 'hid') {
@@ -1513,7 +1514,7 @@ async function saveConfig() {
 
 async function loadConfig() {
   try {
-    const [video, stream, hid, msd, otgNetwork] = await Promise.all([
+    const [video, stream, hid, msd, otgNetwork, uac] = await Promise.all([
       configStore.refreshVideo(),
       configStore.refreshStream(),
       configStore.refreshHid(),
@@ -1525,6 +1526,7 @@ async function loadConfig() {
         host_mac: '',
         device_mac: '',
       })),
+      uacApi.get().catch(() => ({ enabled: false, sample_rate: 48000, channels: 2 })),
     ])
 
     config.value = {
@@ -1548,8 +1550,11 @@ async function loadConfig() {
       hid_ch9329_hybrid_mouse: hid.ch9329_hybrid_mouse ?? false,
       msd_enabled: msd.enabled || false,
       msd_dir: msd.msd_dir || '',
+      msd_flash_inquiry_string: msd.flash_inquiry_string || 'One-KVM Virtual Flash',
+      msd_cdrom_inquiry_string: msd.cdrom_inquiry_string || 'One-KVM Virtual CD-ROM',
       otg_network_enabled: otgNetwork.enabled,
       otg_network_driver: otgNetwork.driver_mode,
+      uac_enabled: uac.enabled,
       otg_network_interface: otgNetwork.bridge_interface,
       encoder_backend: stream.encoder || 'auto',
       stun_server: stream.stun_server || '',
@@ -1583,18 +1588,28 @@ async function loadConfig() {
   }
 }
 
-async function loadDevices() {
+async function loadDeviceConfig() {
   try {
-    const [deviceConfig, networkInterfaces] = await Promise.all([
-      configApi.listDevices(),
-      otgNetworkApi.interfaces().catch(() => []),
-    ])
-    devices.value = deviceConfig
-    otgNetworkInterfaces.value = networkInterfaces
+    devices.value = await configApi.listDevices()
+  } catch {
+  }
+}
+
+async function loadOtgNetworkInterfaces() {
+  otgNetworkInterfacesError.value = ''
+  try {
+    otgNetworkInterfaces.value = await otgNetworkApi.interfaces()
     otgNetworkInterfacesLoaded.value = true
     syncOtgNetworkInterface()
   } catch {
+    otgNetworkInterfaces.value = []
+    otgNetworkInterfacesLoaded.value = false
+    otgNetworkInterfacesError.value = t('settings.otgNetworkInterfacesLoadFailed')
   }
+}
+
+async function loadHidDeviceOptions() {
+  await Promise.all([loadDeviceConfig(), loadOtgNetworkInterfaces()])
 }
 
 async function loadBackends() {
@@ -1641,10 +1656,12 @@ async function loadExtensions() {
       const easytier = extensions.value.easytier.config
       extConfig.value.easytier = {
         enabled: easytier.enabled,
+        config_mode: easytier.config_mode || EasytierConfigMode.Quick,
         network_name: easytier.network_name,
         network_secret: easytier.network_secret,
         peer_urls: easytier.peer_urls || [],
         virtual_ip: easytier.virtual_ip || '',
+        custom_toml: easytier.custom_toml || '',
       }
       const frpc = extensions.value.frpc.config
       extConfig.value.frpc = {
@@ -1702,6 +1719,7 @@ async function refreshExtensionLogs(id: ExtensionConfigId) {
 async function saveExtensionConfig(id: ExtensionConfigId) {
   if (id !== 'ttyd') {
     const shouldValidate = extConfig.value[id].enabled
+      || (id === 'easytier' && extConfig.value.easytier.config_mode === EasytierConfigMode.Full)
       || (id === 'frpc' && extConfig.value.frpc.config_mode === FrpcConfigMode.Full)
     if (shouldValidate && !validateExtensionConfig(id)) return
   }
@@ -1807,7 +1825,7 @@ function getExtStatusClass(status: ExtensionStatus | undefined): string {
   switch (status.state) {
     case 'unavailable': return 'bg-muted-foreground'
     case 'stopped': return 'bg-muted-foreground'
-    case 'running': return 'bg-success'
+    case 'running': return 'bg-status-active'
     default: return 'bg-muted-foreground'
   }
 }
@@ -2486,7 +2504,6 @@ function getRustdeskRendezvousStatusText(status: string | null | undefined): str
   if (!status) return '-'
   switch (status) {
     case 'registered': return t('extensions.rustdesk.registered')
-    case 'connected': return t('extensions.rustdesk.connected')
     case 'connecting': return t('extensions.rustdesk.connecting')
     case 'disconnected': return t('extensions.rustdesk.disconnected')
     default:
@@ -2498,8 +2515,7 @@ function getRustdeskRendezvousStatusText(status: string | null | undefined): str
 function getRustdeskStatusClass(status: string | null | undefined): string {
   switch (status) {
     case 'running':
-    case 'registered':
-    case 'connected': return 'bg-success'
+    case 'registered': return 'bg-status-active'
     case 'starting':
     case 'connecting': return 'bg-warning'
     case 'stopped':
@@ -2677,7 +2693,7 @@ function getVncServiceStatusText(status: string | undefined): string {
 
 function getVncStatusClass(status: string | undefined): string {
   switch (status) {
-    case 'running': return 'bg-success'
+    case 'running': return 'bg-status-active'
     case 'starting': return 'bg-warning'
     case 'stopped': return 'bg-muted-foreground'
     default:
@@ -2700,7 +2716,7 @@ function getRtspServiceStatusText(status: string | undefined): string {
 
 function getRtspStatusClass(status: string | undefined): string {
   switch (status) {
-    case 'running': return 'bg-success'
+    case 'running': return 'bg-status-active'
     case 'starting': return 'bg-warning'
     case 'stopped': return 'bg-muted-foreground'
     default:
@@ -2781,7 +2797,6 @@ watch(isWindows, () => {
       <Sidebar class="top-10 h-[calc(100dvh-2.5rem)] sm:top-14 sm:h-[calc(100dvh-3.5rem)]" collapsible="offcanvas">
         <SidebarHeader class="gap-1 px-6 pt-4 pb-2 text-foreground md:pt-6">
           <h1 class="text-xl font-semibold">{{ t('settings.title') }}</h1>
-          <p class="text-xs text-muted-foreground">{{ t('settings.sidebarSubtitle') }}</p>
         </SidebarHeader>
         <SidebarContent class="px-3 pb-6 md:pb-10">
           <SidebarGroup v-for="group in navGroups" :key="group.title" class="px-0 py-1">
@@ -2803,7 +2818,7 @@ watch(isWindows, () => {
         </SidebarContent>
       </Sidebar>
 
-      <SidebarInset class="min-w-0 overflow-y-auto">
+      <SidebarInset class="min-w-0">
       <!-- Mobile Header -->
       <div class="md:hidden sticky top-0 z-20 flex items-center px-3 sm:px-4 py-2 sm:py-3 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/70">
         <SidebarTrigger class="mr-1.5 size-8 sm:mr-2 sm:size-9" />
@@ -2981,65 +2996,39 @@ watch(isWindows, () => {
                   <CardTitle>{{ t('settings.videoSettings') }}</CardTitle>
                   <CardDescription>{{ t('settings.videoSettingsDesc') }}</CardDescription>
                 </div>
-                <Button variant="ghost" size="icon-sm" :aria-label="t('common.refresh')" @click="loadDevices">
+                <Button variant="ghost" size="icon-sm" :aria-label="t('common.refresh')" @click="loadDeviceConfig">
                   <RefreshCw class="size-4" />
                 </Button>
               </CardHeader>
               <CardContent class="space-y-4">
                 <div class="space-y-2">
                   <Label for="video-device">{{ t('settings.videoDevice') }}</Label>
-                  <Select v-model="config.video_device">
-                    <SelectTrigger id="video-device" class="w-full">
-                      <SelectValue :placeholder="t('settings.selectDevice')" />
-                    </SelectTrigger>
+                  <Select
+                    :model-value="config.video_device"
+                    @update:model-value="value => config.video_device = value === EMPTY_SELECT_VALUE ? '' : String(value)"
+                  >
+                    <SelectTrigger id="video-device" class="w-full"><SelectValue :placeholder="t('settings.selectDevice')" /></SelectTrigger>
                     <SelectContent>
+                      <SelectItem :value="EMPTY_SELECT_VALUE">{{ t('settings.selectDevice') }}</SelectItem>
                       <SelectItem v-for="dev in devices.video" :key="dev.path" :value="dev.path">{{ formatVideoDeviceLabel(dev) }}</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
-                <div class="space-y-2">
-                  <Label for="video-format">{{ t('settings.videoFormat') }}</Label>
-                  <Select v-model="config.video_format" :disabled="!config.video_device">
-                    <SelectTrigger id="video-format" class="w-full">
-                      <SelectValue :placeholder="t('settings.selectFormat')" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem
-                        v-for="fmt in availableFormatOptions"
-                        :key="fmt.format"
-                        :value="fmt.format"
-                        :disabled="fmt.disabled"
-                      >
-                        {{ fmt.format }} - {{ fmt.description }}{{ fmt.disabled ? t('common.notSupportedYet') : '' }}
-                      </SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div class="grid gap-4 sm:grid-cols-2">
-                  <div class="space-y-2">
-                    <Label for="video-resolution">{{ t('settings.resolution') }}</Label>
-                    <Select :model-value="`${config.video_width}x${config.video_height}`" :disabled="!config.video_format" @update:model-value="value => { const parts = String(value).split('x').map(Number); if (parts[0] && parts[1]) { config.video_width = parts[0]; config.video_height = parts[1]; } }">
-                      <SelectTrigger id="video-resolution" class="w-full">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem v-for="res in availableResolutions" :key="`${res.width}x${res.height}`" :value="`${res.width}x${res.height}`">{{ res.width }}x{{ res.height }}</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div class="space-y-2">
-                    <Label for="video-fps">{{ t('settings.frameRate') }}</Label>
-                    <Select :model-value="config.video_fps" :disabled="!config.video_format" @update:model-value="value => config.video_fps = Number(value)">
-                      <SelectTrigger id="video-fps" class="w-full">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem v-for="fps in availableFps" :key="fps" :value="fps">{{ formatFpsLabel(fps) }}</SelectItem>
-                        <SelectItem v-if="!availableFps.includes(config.video_fps)" :value="config.video_fps">{{ formatFpsLabel(config.video_fps) }}</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                </div>
+                <VideoInputFields
+                  v-if="selectedDevice"
+                  :device="selectedDevice"
+                  :formats="availableFormatOptions"
+                  :resolutions="availableResolutions"
+                  :fps-options="availableFps"
+                  :format="config.video_format"
+                  :resolution="videoResolutionSelection"
+                  :fps="config.video_fps"
+                  :refreshing="refreshingInputStatus"
+                  @update:format="config.video_format = $event"
+                  @update:resolution="videoResolutionSelection = $event"
+                  @update:fps="config.video_fps = $event"
+                  @refresh="refreshInputStatus"
+                />
               </CardContent>
             </Card>
 
@@ -3138,7 +3127,7 @@ watch(isWindows, () => {
                   <CardTitle>{{ t('settings.hidSettings') }}</CardTitle>
                   <CardDescription>{{ t('settings.hidSettingsDesc') }}</CardDescription>
                 </div>
-                <Button variant="ghost" size="icon-sm" :aria-label="t('common.refresh')" @click="loadDevices">
+                <Button variant="ghost" size="icon-sm" :aria-label="t('common.refresh')" @click="loadHidDeviceOptions">
                   <RefreshCw class="size-4" />
                 </Button>
               </CardHeader>
@@ -3156,11 +3145,13 @@ watch(isWindows, () => {
                 </div>
                 <div v-if="config.hid_backend === 'ch9329'" class="space-y-2">
                   <Label for="serial-device">{{ t('settings.serialDevice') }}</Label>
-                  <Select v-model="config.hid_serial_device">
-                    <SelectTrigger id="serial-device" class="w-full">
-                      <SelectValue :placeholder="t('settings.selectDevice')" />
-                    </SelectTrigger>
+                  <Select
+                    :model-value="config.hid_serial_device"
+                    @update:model-value="value => config.hid_serial_device = value === EMPTY_SELECT_VALUE ? '' : String(value)"
+                  >
+                    <SelectTrigger id="serial-device" class="w-full"><SelectValue :placeholder="t('settings.selectDevice')" /></SelectTrigger>
                     <SelectContent>
+                      <SelectItem :value="EMPTY_SELECT_VALUE">{{ t('settings.selectDevice') }}</SelectItem>
                       <SelectItem v-for="dev in devices.serial" :key="dev.path" :value="dev.path">{{ dev.name }} ({{ dev.path }})</SelectItem>
                     </SelectContent>
                   </Select>
@@ -3176,11 +3167,13 @@ watch(isWindows, () => {
                 </div>
                 <div v-if="config.hid_backend === 'otg'" class="space-y-2">
                   <Label for="otg-udc">{{ t('settings.otgUdc') }}</Label>
-                  <Select v-model="config.hid_otg_udc">
-                    <SelectTrigger id="otg-udc" class="w-full">
-                      <SelectValue :placeholder="t('settings.autoRecommended')" />
-                    </SelectTrigger>
+                  <Select
+                    :model-value="config.hid_otg_udc"
+                    @update:model-value="value => config.hid_otg_udc = value === EMPTY_SELECT_VALUE ? '' : String(value)"
+                  >
+                    <SelectTrigger id="otg-udc" class="w-full"><SelectValue :placeholder="t('settings.autoRecommended')" /></SelectTrigger>
                     <SelectContent>
+                      <SelectItem :value="EMPTY_SELECT_VALUE">{{ t('settings.autoRecommended') }}</SelectItem>
                       <SelectItem v-for="udc in devices.udc" :key="udc.name" :value="udc.name">{{ udc.name }}</SelectItem>
                     </SelectContent>
                   </Select>
@@ -3355,41 +3348,48 @@ watch(isWindows, () => {
                       <h4 class="text-sm font-medium">{{ t('settings.otgHidProfile') }}</h4>
                     </div>
                     <div class="space-y-3">
-                      <div class="space-y-3 rounded-md border border-border/60 p-3">
-                        <div class="flex items-center justify-between gap-4">
-                          <div>
-                            <Label>{{ t('settings.otgFunctionMouseRelative') }}</Label>
+                      <div class="grid gap-3 md:grid-cols-2">
+                        <div class="space-y-3 rounded-md border border-border/60 p-3">
+                          <div class="flex items-center justify-between gap-4">
+                            <div>
+                              <Label>{{ t('settings.otgFunctionKeyboard') }}</Label>
+                            </div>
+                            <Switch v-model="config.hid_otg_functions.keyboard" />
                           </div>
-                          <Switch v-model="config.hid_otg_functions.mouse_relative" />
+                          <Separator />
+                          <div class="flex items-center justify-between gap-4">
+                            <div>
+                              <Label>{{ t('settings.otgFunctionConsumer') }}</Label>
+                            </div>
+                            <Switch v-model="config.hid_otg_functions.consumer" />
+                          </div>
+                          <Separator />
+                          <div class="flex items-center justify-between gap-4">
+                            <div>
+                              <Label>{{ t('settings.otgKeyboardLeds') }}</Label>
+                            </div>
+                            <Switch v-model="config.hid_otg_keyboard_leds" :disabled="isKeyboardLedToggleDisabled" />
+                          </div>
                         </div>
-                        <Separator />
-                        <div class="flex items-center justify-between gap-4">
-                          <div>
-                            <Label>{{ t('settings.otgFunctionMouseAbsolute') }}</Label>
+                        <div class="space-y-3 rounded-md border border-border/60 p-3">
+                          <div class="flex items-center justify-between gap-4">
+                            <div>
+                              <Label>{{ t('settings.otgFunctionMouseRelative') }}</Label>
+                            </div>
+                            <Switch v-model="config.hid_otg_functions.mouse_relative" />
                           </div>
-                          <Switch v-model="config.hid_otg_functions.mouse_absolute" />
-                        </div>
-                      </div>
-                      <div class="space-y-3 rounded-md border border-border/60 p-3">
-                        <div class="flex items-center justify-between gap-4">
-                          <div>
-                            <Label>{{ t('settings.otgFunctionKeyboard') }}</Label>
+                          <Separator />
+                          <div class="flex items-center justify-between gap-4">
+                            <div>
+                              <Label>{{ t('settings.otgFunctionMouseAbsolute') }}</Label>
+                            </div>
+                            <Switch v-model="config.hid_otg_functions.mouse_absolute" />
                           </div>
-                          <Switch v-model="config.hid_otg_functions.keyboard" />
-                        </div>
-                        <Separator />
-                        <div class="flex items-center justify-between gap-4">
-                          <div>
-                            <Label>{{ t('settings.otgFunctionConsumer') }}</Label>
+                          <Separator />
+                          <div class="flex items-center justify-between gap-4">
+                            <Label>{{ t('settings.uacMic') }}</Label>
+                            <Switch v-model="config.uac_enabled" />
                           </div>
-                          <Switch v-model="config.hid_otg_functions.consumer" />
-                        </div>
-                        <Separator />
-                        <div class="flex items-center justify-between gap-4">
-                          <div>
-                            <Label>{{ t('settings.otgKeyboardLeds') }}</Label>
-                          </div>
-                          <Switch v-model="config.hid_otg_keyboard_leds" :disabled="isKeyboardLedToggleDisabled" />
                         </div>
                       </div>
                       <div class="space-y-3 rounded-md border border-border/60 p-3">
@@ -3404,6 +3404,24 @@ watch(isWindows, () => {
                           <div class="space-y-2">
                             <Label for="msd-dir">{{ t('settings.msdDir') }}</Label>
                             <Input id="msd-dir" v-model="config.msd_dir" placeholder="/etc/one-kvm/msd" />
+                          </div>
+                          <div class="space-y-2">
+                            <Label for="msd-flash-inquiry-string">{{ t('settings.msdFlashInquiryString') }}</Label>
+                            <Input
+                              id="msd-flash-inquiry-string"
+                              v-model="config.msd_flash_inquiry_string"
+                              placeholder="One-KVM Virtual Flash"
+                              maxlength="28"
+                            />
+                          </div>
+                          <div class="space-y-2">
+                            <Label for="msd-cdrom-inquiry-string">{{ t('settings.msdCdromInquiryString') }}</Label>
+                            <Input
+                              id="msd-cdrom-inquiry-string"
+                              v-model="config.msd_cdrom_inquiry_string"
+                              placeholder="One-KVM Virtual CD-ROM"
+                              maxlength="28"
+                            />
                           </div>
                         </template>
                       </div>
@@ -3430,11 +3448,28 @@ watch(isWindows, () => {
                             </div>
                             <div class="space-y-2">
                               <Label for="otg-network-interface">{{ t('settings.otgNetworkInterface') }}</Label>
-                              <Select v-model="config.otg_network_interface" :disabled="otgNetworkInterfaces.length === 0">
-                                <SelectTrigger id="otg-network-interface" class="w-full">
-                                  <SelectValue :placeholder="otgNetworkInterfaces.length === 0 ? t('settings.otgNetworkNone') : ''" />
+                              <Select
+                                :model-value="config.otg_network_interface"
+                                :disabled="otgNetworkInterfaces.length === 0"
+                                @update:model-value="value => config.otg_network_interface = value === EMPTY_SELECT_VALUE ? '' : String(value)"
+                              >
+                                <SelectTrigger
+                                  id="otg-network-interface"
+                                  class="w-full"
+                                  :aria-invalid="Boolean(otgNetworkInterfacesError)"
+                                >
+                                  <SelectValue :placeholder="otgNetworkInterfacesError || t('settings.otgNetworkNone')" />
                                 </SelectTrigger>
                                 <SelectContent>
+                                  <SelectItem
+                                    v-if="otgNetworkInterfacesError"
+                                    :value="config.otg_network_interface || EMPTY_SELECT_VALUE"
+                                  >
+                                    {{ otgNetworkInterfacesError }}
+                                  </SelectItem>
+                                  <SelectItem v-else-if="otgNetworkInterfaces.length === 0" :value="EMPTY_SELECT_VALUE">
+                                    {{ t('settings.otgNetworkNone') }}
+                                  </SelectItem>
                                   <SelectItem
                                     v-for="item in otgNetworkInterfaces"
                                     :key="item.name"
@@ -4129,11 +4164,13 @@ watch(isWindows, () => {
                 <div v-if="['usbrelay', 'serial'].includes(atxConfig.driver)" class="grid gap-4 sm:grid-cols-2">
                   <div v-if="['usbrelay', 'serial'].includes(atxConfig.driver)" class="space-y-2">
                     <Label for="atx-device">{{ t('settings.atxDevice') }}</Label>
-                    <Select v-model="atxConfig.device">
-                      <SelectTrigger id="atx-device" class="w-full">
-                        <SelectValue :placeholder="t('settings.selectDevice')" />
-                      </SelectTrigger>
+                    <Select
+                      :model-value="atxConfig.device"
+                      @update:model-value="value => atxConfig.device = value === EMPTY_SELECT_VALUE ? '' : String(value)"
+                    >
+                      <SelectTrigger id="atx-device" class="w-full"><SelectValue :placeholder="t('settings.selectDevice')" /></SelectTrigger>
                       <SelectContent>
+                        <SelectItem :value="EMPTY_SELECT_VALUE">{{ t('settings.selectDevice') }}</SelectItem>
                         <SelectItem
                           v-for="dev in getAtxDevicesForDriver(atxConfig.driver)"
                           :key="dev"
@@ -4164,11 +4201,13 @@ watch(isWindows, () => {
                       <div class="grid gap-3 sm:grid-cols-3">
                         <div class="space-y-2">
                           <Label for="power-device">{{ t('settings.atxGpioChip') }}</Label>
-                          <Select v-model="atxConfig.power.device">
-                            <SelectTrigger id="power-device" class="w-full">
-                              <SelectValue :placeholder="t('settings.atxDriverNone')" />
-                            </SelectTrigger>
+                          <Select
+                            :model-value="atxConfig.power.device"
+                            @update:model-value="value => atxConfig.power.device = value === EMPTY_SELECT_VALUE ? '' : String(value)"
+                          >
+                            <SelectTrigger id="power-device" class="w-full"><SelectValue :placeholder="t('settings.atxDriverNone')" /></SelectTrigger>
                             <SelectContent>
+                              <SelectItem :value="EMPTY_SELECT_VALUE">{{ t('settings.atxDriverNone') }}</SelectItem>
                               <SelectItem v-for="dev in atxDevices.gpio_chips" :key="dev" :value="dev">{{ dev }}</SelectItem>
                             </SelectContent>
                           </Select>
@@ -4192,11 +4231,13 @@ watch(isWindows, () => {
                       <div class="grid gap-3 sm:grid-cols-3">
                         <div class="space-y-2">
                           <Label for="reset-device">{{ t('settings.atxGpioChip') }}</Label>
-                          <Select v-model="atxConfig.reset.device">
-                            <SelectTrigger id="reset-device" class="w-full">
-                              <SelectValue :placeholder="t('settings.atxDriverNone')" />
-                            </SelectTrigger>
+                          <Select
+                            :model-value="atxConfig.reset.device"
+                            @update:model-value="value => atxConfig.reset.device = value === EMPTY_SELECT_VALUE ? '' : String(value)"
+                          >
+                            <SelectTrigger id="reset-device" class="w-full"><SelectValue :placeholder="t('settings.atxDriverNone')" /></SelectTrigger>
                             <SelectContent>
+                              <SelectItem :value="EMPTY_SELECT_VALUE">{{ t('settings.atxDriverNone') }}</SelectItem>
                               <SelectItem v-for="dev in atxDevices.gpio_chips" :key="dev" :value="dev">{{ dev }}</SelectItem>
                             </SelectContent>
                           </Select>
@@ -4220,11 +4261,13 @@ watch(isWindows, () => {
                       <div class="grid gap-3 sm:grid-cols-3">
                         <div class="space-y-2">
                           <Label for="led-device">{{ t('settings.atxGpioChip') }}</Label>
-                          <Select v-model="atxConfig.led.device">
-                            <SelectTrigger id="led-device" class="w-full">
-                              <SelectValue :placeholder="t('settings.atxDriverNone')" />
-                            </SelectTrigger>
+                          <Select
+                            :model-value="atxConfig.led.device"
+                            @update:model-value="value => atxConfig.led.device = value === EMPTY_SELECT_VALUE ? '' : String(value)"
+                          >
+                            <SelectTrigger id="led-device" class="w-full"><SelectValue :placeholder="t('settings.atxDriverNone')" /></SelectTrigger>
                             <SelectContent>
+                              <SelectItem :value="EMPTY_SELECT_VALUE">{{ t('settings.atxDriverNone') }}</SelectItem>
                               <SelectItem v-for="dev in atxDevices.gpio_chips" :key="dev" :value="dev">{{ dev }}</SelectItem>
                             </SelectContent>
                           </Select>
@@ -4248,11 +4291,13 @@ watch(isWindows, () => {
                       <div class="grid gap-3 sm:grid-cols-3">
                         <div class="space-y-2">
                           <Label for="hdd-device">{{ t('settings.atxGpioChip') }}</Label>
-                          <Select v-model="atxConfig.hdd.device">
-                            <SelectTrigger id="hdd-device" class="w-full">
-                              <SelectValue :placeholder="t('settings.atxDriverNone')" />
-                            </SelectTrigger>
+                          <Select
+                            :model-value="atxConfig.hdd.device"
+                            @update:model-value="value => atxConfig.hdd.device = value === EMPTY_SELECT_VALUE ? '' : String(value)"
+                          >
+                            <SelectTrigger id="hdd-device" class="w-full"><SelectValue :placeholder="t('settings.atxDriverNone')" /></SelectTrigger>
                             <SelectContent>
+                              <SelectItem :value="EMPTY_SELECT_VALUE">{{ t('settings.atxDriverNone') }}</SelectItem>
                               <SelectItem v-for="dev in atxDevices.gpio_chips" :key="dev" :value="dev">{{ dev }}</SelectItem>
                             </SelectContent>
                           </Select>
@@ -4347,7 +4392,7 @@ watch(isWindows, () => {
                   <!-- Status and controls -->
                   <div class="flex items-center justify-between">
                     <div class="flex items-center gap-2">
-                      <div :class="['w-2 h-2 rounded-full', getExtStatusClass(extensions?.ttyd?.status)]" />
+                      <div :class="['size-2 rounded-full', getExtStatusClass(extensions?.ttyd?.status)]" />
                       <span class="text-sm">{{ getExtStatusText(extensions?.ttyd?.status) }}</span>
                     </div>
                     <div class="flex gap-2">
@@ -4484,7 +4529,7 @@ watch(isWindows, () => {
                   <!-- Status and controls -->
                   <div class="flex items-center justify-between">
                     <div class="flex items-center gap-2">
-                      <div :class="['w-2 h-2 rounded-full', getExtStatusClass(extensions?.gostc?.status)]" />
+                      <div :class="['size-2 rounded-full', getExtStatusClass(extensions?.gostc?.status)]" />
                       <span class="text-sm">{{ getExtStatusText(extensions?.gostc?.status) }}</span>
                     </div>
                     <div class="flex gap-2">
@@ -4579,7 +4624,7 @@ watch(isWindows, () => {
                   <!-- Status and controls -->
                   <div class="flex items-center justify-between">
                     <div class="flex items-center gap-2">
-                      <div :class="['w-2 h-2 rounded-full', getExtStatusClass(extensions?.easytier?.status)]" />
+                      <div :class="['size-2 rounded-full', getExtStatusClass(extensions?.easytier?.status)]" />
                       <span class="text-sm">{{ getExtStatusText(extensions?.easytier?.status) }}</span>
                     </div>
                     <div class="flex gap-2">
@@ -4611,38 +4656,50 @@ watch(isWindows, () => {
                       <Label>{{ t('extensions.autoStart') }}</Label>
                       <Switch v-model="extConfig.easytier.enabled" :disabled="isExtRunning(extensions?.easytier?.status)" />
                     </div>
-                    <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
-                      <Label class="sm:text-right">{{ t('extensions.easytier.networkName') }}</Label>
-                      <div class="sm:col-span-3 space-y-1">
-                        <Input v-model="extConfig.easytier.network_name" :disabled="isExtRunning(extensions?.easytier?.status)" />
-                        <p v-if="extConfig.easytier.enabled && !extConfig.easytier.network_name?.trim()" class="text-xs text-destructive">{{ t('extensions.easytier.networkNameRequired') }}</p>
-                      </div>
-                    </div>
-                    <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
-                      <Label class="sm:text-right">{{ t('extensions.easytier.networkSecret') }}</Label>
-                      <Input v-model="extConfig.easytier.network_secret" type="password" autocomplete="off" class="sm:col-span-3" :disabled="isExtRunning(extensions?.easytier?.status)" />
-                    </div>
-                    <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
-                      <Label class="sm:text-right">{{ t('extensions.easytier.peers') }}</Label>
-                      <div class="sm:col-span-3 space-y-2">
-                        <div v-for="(_, i) in extConfig.easytier.peer_urls" :key="i" class="flex gap-2">
-                          <Input v-model="extConfig.easytier.peer_urls[i]" placeholder="tcp://1.2.3.4:11010" :disabled="isExtRunning(extensions?.easytier?.status)" />
-                          <Button variant="ghost" size="icon" :aria-label="t('common.delete')" @click="removeEasytierPeer(i)" :disabled="isExtRunning(extensions?.easytier?.status)">
-                            <Trash2 class="size-4" />
-                          </Button>
+                    <ExtensionConfigModeEditor
+                      v-model:mode="extConfig.easytier.config_mode"
+                      v-model:config="extConfig.easytier.custom_toml"
+                      :disabled="isExtRunning(extensions?.easytier?.status)"
+                      :quick-label="t('extensions.easytier.quickConfig')"
+                      :full-label="t('extensions.easytier.fullConfig')"
+                      :full-config-hint="t('extensions.easytier.fullConfigHint')"
+                      :full-config-required="t('extensions.easytier.fullConfigRequired')"
+                    >
+                      <template #quick>
+                        <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
+                          <Label class="sm:text-right">{{ t('extensions.easytier.networkName') }}</Label>
+                          <div class="sm:col-span-3 space-y-1">
+                            <Input v-model="extConfig.easytier.network_name" :disabled="isExtRunning(extensions?.easytier?.status)" />
+                            <p v-if="extConfig.easytier.enabled && !extConfig.easytier.network_name?.trim()" class="text-xs text-destructive">{{ t('extensions.easytier.networkNameRequired') }}</p>
+                          </div>
                         </div>
-                        <Button variant="outline" size="sm" @click="addEasytierPeer" :disabled="isExtRunning(extensions?.easytier?.status)">
-                          <Plus class="size-4 mr-1" />
-                          {{ t('extensions.easytier.addPeer') }}
-                        </Button>
-                      </div>
-                    </div>
-                    <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
-                      <Label class="sm:text-right">{{ t('extensions.easytier.virtualIp') }}</Label>
-                      <div class="sm:col-span-3 space-y-1">
-                        <Input v-model="extConfig.easytier.virtual_ip" placeholder="10.0.0.1/24" :disabled="isExtRunning(extensions?.easytier?.status)" />
-                      </div>
-                    </div>
+                        <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
+                          <Label class="sm:text-right">{{ t('extensions.easytier.networkSecret') }}</Label>
+                          <Input v-model="extConfig.easytier.network_secret" type="password" autocomplete="off" class="sm:col-span-3" :disabled="isExtRunning(extensions?.easytier?.status)" />
+                        </div>
+                        <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
+                          <Label class="sm:text-right">{{ t('extensions.easytier.peers') }}</Label>
+                          <div class="sm:col-span-3 space-y-2">
+                            <div v-for="(_, i) in extConfig.easytier.peer_urls" :key="i" class="flex gap-2">
+                              <Input v-model="extConfig.easytier.peer_urls[i]" placeholder="tcp://1.2.3.4:11010" :disabled="isExtRunning(extensions?.easytier?.status)" />
+                              <Button variant="ghost" size="icon" :aria-label="t('common.delete')" @click="removeEasytierPeer(i)" :disabled="isExtRunning(extensions?.easytier?.status)">
+                                <Trash2 class="size-4" />
+                              </Button>
+                            </div>
+                            <Button variant="outline" size="sm" @click="addEasytierPeer" :disabled="isExtRunning(extensions?.easytier?.status)">
+                              <Plus class="size-4 mr-1" />
+                              {{ t('extensions.easytier.addPeer') }}
+                            </Button>
+                          </div>
+                        </div>
+                        <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
+                          <Label class="sm:text-right">{{ t('extensions.easytier.virtualIp') }}</Label>
+                          <div class="sm:col-span-3 space-y-1">
+                            <Input v-model="extConfig.easytier.virtual_ip" placeholder="10.0.0.1/24" :disabled="isExtRunning(extensions?.easytier?.status)" />
+                          </div>
+                        </div>
+                      </template>
+                    </ExtensionConfigModeEditor>
                   </div>
                   <!-- Logs -->
                   <div class="space-y-2">
@@ -4685,7 +4742,7 @@ watch(isWindows, () => {
                 <template v-else>
                   <div class="flex items-center justify-between">
                     <div class="flex items-center gap-2">
-                      <div :class="['w-2 h-2 rounded-full', getExtStatusClass(extensions?.frpc?.status)]" />
+                      <div :class="['size-2 rounded-full', getExtStatusClass(extensions?.frpc?.status)]" />
                       <span class="text-sm">{{ getExtStatusText(extensions?.frpc?.status) }}</span>
                     </div>
                     <div class="flex gap-2">
@@ -4716,104 +4773,86 @@ watch(isWindows, () => {
                       <Label>{{ t('extensions.autoStart') }}</Label>
                       <Switch v-model="extConfig.frpc.enabled" :disabled="isExtRunning(extensions?.frpc?.status)" />
                     </div>
-                    <ButtonGroup class="grid w-full grid-cols-2">
-                      <Button
-                        type="button"
-                        :variant="frpcQuickMode ? 'default' : 'outline'"
-                        :disabled="isExtRunning(extensions?.frpc?.status)"
-                        @click="extConfig.frpc.config_mode = FrpcConfigMode.Quick"
-                      >
-                        {{ t('extensions.frpc.quickConfig') }}
-                      </Button>
-                      <Button
-                        type="button"
-                        :variant="!frpcQuickMode ? 'default' : 'outline'"
-                        :disabled="isExtRunning(extensions?.frpc?.status)"
-                        @click="extConfig.frpc.config_mode = FrpcConfigMode.Full"
-                      >
-                        {{ t('extensions.frpc.fullConfig') }}
-                      </Button>
-                    </ButtonGroup>
-                    <template v-if="frpcQuickMode">
-                      <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
-                        <Label class="sm:text-right">{{ t('extensions.frpc.proxyType') }}</Label>
-                        <div class="sm:col-span-3">
-                          <RadioGroup v-model="extConfig.frpc.proxy_type" class="flex flex-wrap gap-4" :disabled="isExtRunning(extensions?.frpc?.status)">
-                            <div v-for="type in ['tcp', 'udp', 'http', 'https', 'stcp', 'sudp', 'xtcp']" :key="type" class="flex items-center space-x-2">
-                              <RadioGroupItem :value="type" :id="`frpc-${type}`" />
-                              <Label :for="`frpc-${type}`" class="cursor-pointer uppercase">{{ type }}</Label>
-                            </div>
-                          </RadioGroup>
+                    <ExtensionConfigModeEditor
+                      v-model:mode="extConfig.frpc.config_mode"
+                      v-model:config="extConfig.frpc.custom_toml"
+                      :disabled="isExtRunning(extensions?.frpc?.status)"
+                      :quick-label="t('extensions.frpc.quickConfig')"
+                      :full-label="t('extensions.frpc.fullConfig')"
+                      :full-config-hint="t('extensions.frpc.fullConfigHint')"
+                      :full-config-required="t('extensions.frpc.fullConfigRequired')"
+                    >
+                      <template #quick>
+                        <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
+                          <Label class="sm:text-right">{{ t('extensions.frpc.proxyType') }}</Label>
+                          <div class="sm:col-span-3">
+                            <RadioGroup v-model="extConfig.frpc.proxy_type" class="flex flex-wrap gap-4" :disabled="isExtRunning(extensions?.frpc?.status)">
+                              <div v-for="type in ['tcp', 'udp', 'http', 'https', 'stcp', 'sudp', 'xtcp']" :key="type" class="flex items-center space-x-2">
+                                <RadioGroupItem :value="type" :id="`frpc-${type}`" />
+                                <Label :for="`frpc-${type}`" class="cursor-pointer uppercase">{{ type }}</Label>
+                              </div>
+                            </RadioGroup>
+                          </div>
                         </div>
-                      </div>
-                      <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
-                        <Label class="sm:text-right">{{ t('extensions.frpc.proxyName') }}</Label>
-                        <div class="sm:col-span-3 space-y-1">
-                          <Input v-model="extConfig.frpc.proxy_name" :placeholder="t('extensions.frpc.proxyNamePlaceholder')" :disabled="isExtRunning(extensions?.frpc?.status)" />
-                          <p v-if="extConfig.frpc.enabled && !extConfig.frpc.proxy_name?.trim()" class="text-xs text-destructive">{{ t('extensions.frpc.proxyNameRequired') }}</p>
+                        <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
+                          <Label class="sm:text-right">{{ t('extensions.frpc.proxyName') }}</Label>
+                          <div class="sm:col-span-3 space-y-1">
+                            <Input v-model="extConfig.frpc.proxy_name" :placeholder="t('extensions.frpc.proxyNamePlaceholder')" :disabled="isExtRunning(extensions?.frpc?.status)" />
+                            <p v-if="extConfig.frpc.enabled && !extConfig.frpc.proxy_name?.trim()" class="text-xs text-destructive">{{ t('extensions.frpc.proxyNameRequired') }}</p>
+                          </div>
                         </div>
-                      </div>
-                      <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
-                        <Label class="sm:text-right">{{ t('extensions.frpc.serverAddr') }}</Label>
-                        <div class="sm:col-span-3 space-y-1">
-                          <Input v-model="extConfig.frpc.server_addr" :placeholder="t('extensions.frpc.serverAddrPlaceholder')" :disabled="isExtRunning(extensions?.frpc?.status)" />
-                          <p v-if="extConfig.frpc.enabled && !extConfig.frpc.server_addr?.trim()" class="text-xs text-destructive">{{ t('extensions.frpc.serverAddrRequired') }}</p>
+                        <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
+                          <Label class="sm:text-right">{{ t('extensions.frpc.serverAddr') }}</Label>
+                          <div class="sm:col-span-3 space-y-1">
+                            <Input v-model="extConfig.frpc.server_addr" :placeholder="t('extensions.frpc.serverAddrPlaceholder')" :disabled="isExtRunning(extensions?.frpc?.status)" />
+                            <p v-if="extConfig.frpc.enabled && !extConfig.frpc.server_addr?.trim()" class="text-xs text-destructive">{{ t('extensions.frpc.serverAddrRequired') }}</p>
+                          </div>
                         </div>
-                      </div>
-                      <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
-                        <Label class="sm:text-right">{{ t('extensions.frpc.serverPort') }}</Label>
-                        <Input v-model.number="extConfig.frpc.server_port" class="sm:col-span-3" type="number" min="1" max="65535" :disabled="isExtRunning(extensions?.frpc?.status)" />
-                      </div>
-                      <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
-                        <Label class="sm:text-right">{{ t('extensions.frpc.token') }}</Label>
-                        <div class="sm:col-span-3 space-y-1">
-                          <Input v-model="extConfig.frpc.token" type="password" autocomplete="off" :disabled="isExtRunning(extensions?.frpc?.status)" />
-                          <p v-if="extConfig.frpc.enabled && !extConfig.frpc.token" class="text-xs text-destructive">{{ t('extensions.frpc.tokenRequired') }}</p>
+                        <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
+                          <Label class="sm:text-right">{{ t('extensions.frpc.serverPort') }}</Label>
+                          <Input v-model.number="extConfig.frpc.server_port" class="sm:col-span-3" type="number" min="1" max="65535" :disabled="isExtRunning(extensions?.frpc?.status)" />
                         </div>
-                      </div>
-                      <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
-                        <Label class="sm:text-right">{{ t('extensions.frpc.localIp') }}</Label>
-                        <div class="sm:col-span-3 space-y-1">
-                          <Input v-model="extConfig.frpc.local_ip" placeholder="127.0.0.1" :disabled="isExtRunning(extensions?.frpc?.status)" />
-                          <p v-if="extConfig.frpc.enabled && !extConfig.frpc.local_ip?.trim()" class="text-xs text-destructive">{{ t('extensions.frpc.localIpRequired') }}</p>
+                        <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
+                          <Label class="sm:text-right">{{ t('extensions.frpc.token') }}</Label>
+                          <div class="sm:col-span-3 space-y-1">
+                            <Input v-model="extConfig.frpc.token" type="password" autocomplete="off" :disabled="isExtRunning(extensions?.frpc?.status)" />
+                            <p v-if="extConfig.frpc.enabled && !extConfig.frpc.token" class="text-xs text-destructive">{{ t('extensions.frpc.tokenRequired') }}</p>
+                          </div>
                         </div>
-                      </div>
-                      <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
-                        <Label class="sm:text-right">{{ t('extensions.frpc.localPort') }}</Label>
-                        <Input v-model.number="extConfig.frpc.local_port" class="sm:col-span-3" type="number" min="1" max="65535" :disabled="isExtRunning(extensions?.frpc?.status)" />
-                      </div>
-                      <div v-if="showFrpcRemotePort" class="grid gap-2 sm:grid-cols-4 sm:items-center">
-                        <Label class="sm:text-right">{{ t('extensions.frpc.remotePort') }}</Label>
-                        <div class="sm:col-span-3 space-y-1">
-                          <Input v-model.number="extConfig.frpc.remote_port" type="number" min="1" max="65535" :disabled="isExtRunning(extensions?.frpc?.status)" />
-                          <p v-if="extConfig.frpc.enabled && frpcRemotePortRequired && !extConfig.frpc.remote_port" class="text-xs text-destructive">{{ t('extensions.frpc.remotePortRequired') }}</p>
+                        <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
+                          <Label class="sm:text-right">{{ t('extensions.frpc.localIp') }}</Label>
+                          <div class="sm:col-span-3 space-y-1">
+                            <Input v-model="extConfig.frpc.local_ip" placeholder="127.0.0.1" :disabled="isExtRunning(extensions?.frpc?.status)" />
+                            <p v-if="extConfig.frpc.enabled && !extConfig.frpc.local_ip?.trim()" class="text-xs text-destructive">{{ t('extensions.frpc.localIpRequired') }}</p>
+                          </div>
                         </div>
-                      </div>
-                      <div v-if="showFrpcCustomDomain" class="grid gap-2 sm:grid-cols-4 sm:items-center">
-                        <Label class="sm:text-right">{{ t('extensions.frpc.customDomain') }}</Label>
-                        <Input v-model="extConfig.frpc.custom_domain" class="sm:col-span-3" :placeholder="t('extensions.frpc.customDomainPlaceholder')" :disabled="isExtRunning(extensions?.frpc?.status)" />
-                      </div>
-                      <div v-if="showFrpcSecretKey" class="grid gap-2 sm:grid-cols-4 sm:items-center">
-                        <Label class="sm:text-right">{{ t('extensions.frpc.secretKey') }}</Label>
-                        <Input v-model="extConfig.frpc.secret_key" class="sm:col-span-3" type="password" autocomplete="off" :disabled="isExtRunning(extensions?.frpc?.status)" />
-                      </div>
-                      <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
-                        <Label class="sm:text-right">{{ t('extensions.frpc.tls') }}</Label>
-                        <div class="sm:col-span-3">
-                          <Switch v-model="extConfig.frpc.tls" :disabled="isExtRunning(extensions?.frpc?.status)" />
+                        <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
+                          <Label class="sm:text-right">{{ t('extensions.frpc.localPort') }}</Label>
+                          <Input v-model.number="extConfig.frpc.local_port" class="sm:col-span-3" type="number" min="1" max="65535" :disabled="isExtRunning(extensions?.frpc?.status)" />
                         </div>
-                      </div>
-                    </template>
-                    <div v-else class="space-y-1">
-                      <Textarea
-                        v-model="extConfig.frpc.custom_toml"
-                        class="min-h-[300px] font-mono text-xs"
-                        spellcheck="false"
-                        :disabled="isExtRunning(extensions?.frpc?.status)"
-                      />
-                      <p class="text-xs text-muted-foreground">{{ t('extensions.frpc.fullConfigHint') }}</p>
-                      <p v-if="!extConfig.frpc.custom_toml?.trim()" class="text-xs text-destructive">{{ t('extensions.frpc.fullConfigRequired') }}</p>
-                    </div>
+                        <div v-if="showFrpcRemotePort" class="grid gap-2 sm:grid-cols-4 sm:items-center">
+                          <Label class="sm:text-right">{{ t('extensions.frpc.remotePort') }}</Label>
+                          <div class="sm:col-span-3 space-y-1">
+                            <Input v-model.number="extConfig.frpc.remote_port" type="number" min="1" max="65535" :disabled="isExtRunning(extensions?.frpc?.status)" />
+                            <p v-if="extConfig.frpc.enabled && frpcRemotePortRequired && !extConfig.frpc.remote_port" class="text-xs text-destructive">{{ t('extensions.frpc.remotePortRequired') }}</p>
+                          </div>
+                        </div>
+                        <div v-if="showFrpcCustomDomain" class="grid gap-2 sm:grid-cols-4 sm:items-center">
+                          <Label class="sm:text-right">{{ t('extensions.frpc.customDomain') }}</Label>
+                          <Input v-model="extConfig.frpc.custom_domain" class="sm:col-span-3" :placeholder="t('extensions.frpc.customDomainPlaceholder')" :disabled="isExtRunning(extensions?.frpc?.status)" />
+                        </div>
+                        <div v-if="showFrpcSecretKey" class="grid gap-2 sm:grid-cols-4 sm:items-center">
+                          <Label class="sm:text-right">{{ t('extensions.frpc.secretKey') }}</Label>
+                          <Input v-model="extConfig.frpc.secret_key" class="sm:col-span-3" type="password" autocomplete="off" :disabled="isExtRunning(extensions?.frpc?.status)" />
+                        </div>
+                        <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
+                          <Label class="sm:text-right">{{ t('extensions.frpc.tls') }}</Label>
+                          <div class="sm:col-span-3">
+                            <Switch v-model="extConfig.frpc.tls" :disabled="isExtRunning(extensions?.frpc?.status)" />
+                          </div>
+                        </div>
+                      </template>
+                    </ExtensionConfigModeEditor>
                   </div>
                   <div class="space-y-2">
                     <Collapsible v-model:open="showLogs.frpc" @update:open="open => open && refreshExtensionLogs('frpc')">
@@ -4859,7 +4898,7 @@ watch(isWindows, () => {
               <CardContent class="space-y-4">
                 <div class="flex items-center justify-between">
                   <div class="flex items-center gap-2">
-                    <div :class="['w-2 h-2 rounded-full', getRtspStatusClass(rtspStatus?.service_status)]" />
+                    <div :class="['size-2 rounded-full', getRtspStatusClass(rtspStatus?.service_status)]" />
                     <span class="text-sm">{{ getRtspServiceStatusText(rtspStatus?.service_status) }}</span>
                   </div>
                   <div class="flex items-center gap-2">
@@ -4985,7 +5024,7 @@ watch(isWindows, () => {
               <CardContent class="space-y-4">
                 <div class="flex items-center justify-between">
                   <div class="flex items-center gap-2">
-                    <div :class="['w-2 h-2 rounded-full', getVncStatusClass(vncStatus?.service_status)]" />
+                    <div :class="['size-2 rounded-full', getVncStatusClass(vncStatus?.service_status)]" />
                     <span class="text-sm">{{ getVncServiceStatusText(vncStatus?.service_status) }}</span>
                     <template v-if="vncStatus?.connection_count">
                       <span class="text-muted-foreground">|</span>
@@ -5108,11 +5147,11 @@ watch(isWindows, () => {
                 <!-- Status and controls -->
                 <div class="flex items-center justify-between">
                   <div class="flex items-center gap-2">
-                    <div :class="['w-2 h-2 rounded-full', getRustdeskStatusClass(rustdeskStatus?.service_status)]" />
+                    <div :class="['size-2 rounded-full', getRustdeskStatusClass(rustdeskStatus?.service_status)]" />
                     <span class="text-sm">{{ getRustdeskServiceStatusText(rustdeskStatus?.service_status) }}</span>
                     <template v-if="rustdeskStatus?.rendezvous_status">
                       <span class="text-muted-foreground">|</span>
-                      <div :class="['w-2 h-2 rounded-full', getRustdeskStatusClass(rustdeskStatus?.rendezvous_status)]" />
+                      <div :class="['size-2 rounded-full', getRustdeskStatusClass(rustdeskStatus?.rendezvous_status)]" />
                       <span class="text-sm text-muted-foreground">{{ getRustdeskRendezvousStatusText(rustdeskStatus?.rendezvous_status) }}</span>
                     </template>
                   </div>

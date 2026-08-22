@@ -1,3 +1,4 @@
+use crate::error::MsdErrorCode;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -546,6 +547,23 @@ pub struct RedfishExtendedInfo {
 }
 
 impl RedfishError {
+    pub fn msd(code: MsdErrorCode) -> Self {
+        let message_id = format!("OneKVM.1.0.{}", code.redfish_key());
+        Self {
+            error: RedfishErrorBody {
+                code: message_id.clone(),
+                message: code.message().to_string(),
+                extended_info: vec![RedfishExtendedInfo {
+                    odata_type: "#Message.v1_2_1.Message".to_string(),
+                    message_id,
+                    message: code.message().to_string(),
+                    severity: code.severity().to_string(),
+                    resolution: code.resolution().to_string(),
+                }],
+            },
+        }
+    }
+
     pub fn general_error(message: &str) -> Self {
         Self {
             error: RedfishErrorBody {
